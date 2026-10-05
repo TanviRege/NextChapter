@@ -34,6 +34,12 @@ def save_table(df, db_name=DB_NAME, table_name=TABLE_NAME):
 
 # ── Page config ──────────────────────────────────────────────────────────────
 st.set_page_config(page_title="NextChapter", page_icon="📚", layout="wide")
+
+# ── Clear DB on fresh session start ──────────────────────────────────────────
+if "initialized" not in st.session_state:
+    if os.path.exists(DB_NAME):
+        os.remove(DB_NAME)
+    st.session_state["initialized"] = True
 st.title("NextChapter 📚")
 
 # ── Upload section ────────────────────────────────────────────────────────────
