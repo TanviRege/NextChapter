@@ -25,8 +25,14 @@ def clean_field(text: str) -> str:
     if not text or not isinstance(text, str):
         return ""
     s = text.strip()
-    s = re.sub(r"^['\"'\"\u201c\u201d\u2018\u2019]+|['\"'\"\u201c\u201d\u2018\u2019]+$", "", s)
+    # Strip markdown checkbox markers: "- [ ]", "* [x]", "[ ]", etc.
+    s = re.sub(r"^\s*[-*•]?\s*\[\s*[xX ]?\s*\]\s*", "", s)
+    # Strip quotes, parenthesis, brackets from edges
+    s = re.sub(r"^[\[\]\(\)'\"'\"\u201c\u201d\u2018\u2019]+|[\[\]\(\)'\"'\"\u201c\u201d\u2018\u2019]+$", "", s)
+    # Strip numbered list or bullet markers
     s = re.sub(r"^\s*(?:\d+[.)\-]\s*|[\-•*]\s+)", "", s)
+    # Strip stray hyphens, dashes, or colons from edges
+    s = re.sub(r"^[-–—:]+|[-–—:]+$", "", s).strip()
     s = re.sub(r"\s+", " ", s).strip()
     return s.title()
 
@@ -74,6 +80,9 @@ def parse_book_line(line: str) -> Optional[Dict[str, object]]:
     if not s:
         return None
 
+    # Strip markdown checkbox items like "- [ ]", "* [x]", etc.
+    s = re.sub(r"^\s*[-*•]?\s*\[\s*[xX ]?\s*\]\s*", "", s).strip()
+    # Strip numbered or standard list markers
     s = re.sub(r"^\s*(?:\d+[.)\-]\s*|[•*]\s+)", "", s).strip()
 
     title = ""
@@ -86,8 +95,9 @@ def parse_book_line(line: str) -> Optional[Dict[str, object]]:
         title_part = by_match.group(1).strip()
         rest = by_match.group(2).strip()
 
+        # Handle trailing rating with comma, semicolon, dash, hyphen, or pipe separator
         trailing_rating = re.search(
-            r"[,;]\s*(\d+\.?\d*(?:\s*/\s*\d+)?(?:\s*stars?)?)\s*$",
+            r"[,;\-–—|]\s*(\d+\.?\d*(?:\s*/\s*\d+)?(?:\s*stars?)?)\s*$",
             rest,
             re.IGNORECASE,
         )
