@@ -3,7 +3,8 @@ import pandas as pd
 import sqlite3
 import os
 import re
-from typing import Dict, Optional
+import requests
+from typing import Dict, Optional, Union, List
 
 DB_NAME = "catalog.db"
 TABLE_NAME = "user_catalog"
@@ -229,6 +230,216 @@ def to_goodreads_df(parsed_df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+# ── Open Library Enrichment Helpers ───────────────────────────────────────────
+PRIORITY_GENRES = [
+    "historical fiction", "science fiction", "fiction", "nonfiction", "romance",
+    "thriller", "mystery", "suspense", "war", "family", "art", "history",
+    "biography", "autobiography", "memoir", "science", "fantasy", "crime",
+    "horror", "adventure", "poetry", "drama", "philosophy", "psychology", "politics",
+]
+
+
+def clean_and_prioritize_subjects(
+    raw_subjects: list,
+    places: list = None,
+    times: list = None,
+    limit: int = 5,
+) -> list:
+    """Filter, clean, and prioritize subjects matching priority genres."""
+    if not raw_subjects:
+        return []
+    places_set = {str(p).lower().strip() for p in (places or []) if p}
+    times_set = {str(t).lower().strip() for t in (times or []) if t}
+    time_regex = re.compile(
+        r"(\b(1\d{3}|20\d{2})s?\b|\b\d{1,2}(st|nd|rd|th)\s+century\b)",
+        re.IGNORECASE,
+    )
+    seen = set()
+    cleaned = []
+    for item in raw_subjects:
+        if not item or not isinstance(item, str):
+            continue
+        s = item.lower().strip()
+        if any(bad in s for bad in [":", "http", "fast (", "(ocolc)", "new york times", "bestseller"]):
+            continue
+        if s in seen:
+            continue
+        seen.add(s)
+        if s in places_set or s in times_set or "(imaginary place)" in s or "(place)" in s:
+            continue
+        if any(p in s for p in places_set if len(p) > 2) and (", fiction" in s or "description and travel" in s):
+            continue
+        if time_regex.search(s) and not any(kw in s for kw in ["war", "history"]):
+            continue
+        cleaned.append(s)
+
+    tier1, tier2, tier3 = [], [], []
+    for s in cleaned:
+        if s in PRIORITY_GENRES:
+            tier1.append(s)
+        elif any(re.search(r"\b" + re.escape(g) + r"\b", s) for g in PRIORITY_GENRES):
+            tier2.append(s)
+        else:
+            tier3.append(s)
+
+    selected = []
+    selected_words = set()
+    for s in (tier1 + tier2 + tier3):
+        words = set(re.findall(r"\b\w+\b", s))
+        if len(words) > 1 and words.issubset(selected_words):
+            continue
+        selected.append(s)
+        selected_words.update(words)
+        if len(selected) >= limit:
+            break
+    return selected
+
+
+def fetch_best_book_match(title: str, author: str) -> Optional[dict]:
+    """Query Open Library API by title and author, falling back to query search."""
+    url = "https://openlibrary.org/search.json"
+    fields = (
+        "key,title,author_name,first_publish_year,edition_count,"
+        "number_of_pages_median,ratings_average,ratings_count,subject,place,time,cover_i"
+    )
+
+    # 1. Exact title & author search
+    params = {"title": title, "author": author, "limit": 5, "fields": fields}
+    try:
+        response = requests.get(url, params=params, timeout=10)
+        docs = response.json().get("docs", [])
+    except Exception:
+        docs = []
+
+    # 2. General query fallback
+    if not docs:
+        params_q = {"q": f"{title} {author}", "limit": 10, "fields": fields}
+        try:
+            response = requests.get(url, params=params_q, timeout=10)
+            docs = response.json().get("docs", [])
+        except Exception:
+            docs = []
+
+    if not docs:
+        return None
+
+    # Filter by author match if possible
+    author_tokens = set(author.lower().split())
+    author_matched_docs = [
+        d for d in docs
+        if any(
+            any(t in a.lower() for t in author_tokens if len(t) > 2)
+            for a in d.get("author_name", [])
+        )
+    ]
+    candidate_pool = author_matched_docs if author_matched_docs else docs
+
+    # Exclude summaries / study guides
+    non_summary = [
+        d for d in candidate_pool
+        if not any(
+            kw in d.get("title", "").lower() or kw in " ".join(d.get("author_name", [])).lower()
+            for kw in ["study guide", "supersummary", "instaread"]
+        )
+    ]
+    if non_summary:
+        candidate_pool = non_summary
+
+    best = max(candidate_pool, key=lambda d: d.get("edition_count", 0))
+    return best
+
+
+def format_openlibrary_result(doc: dict, fallback_pages: int = None) -> dict:
+    """Format and clean fields from Open Library response."""
+    subjects = clean_and_prioritize_subjects(
+        raw_subjects=doc.get("subject"),
+        places=doc.get("place"),
+        times=doc.get("time"),
+        limit=5,
+    )
+
+    raw_pages = doc.get("number_of_pages_median")
+    pages_median = None
+    if raw_pages is not None:
+        try:
+            val = int(raw_pages)
+            if val < 25 and fallback_pages and fallback_pages >= 25:
+                pages_median = int(fallback_pages)
+            else:
+                pages_median = val
+        except (ValueError, TypeError):
+            pages_median = int(fallback_pages) if fallback_pages else None
+    elif fallback_pages:
+        try:
+            pages_median = int(fallback_pages)
+        except (ValueError, TypeError):
+            pages_median = None
+
+    ratings_avg = None
+    if doc.get("ratings_average") is not None:
+        try:
+            ratings_avg = round(float(doc["ratings_average"]), 2)
+        except (ValueError, TypeError):
+            ratings_avg = None
+
+    return {
+        "ol_key": doc.get("key"),
+        "Average Rating": ratings_avg,
+        "Number of Pages": pages_median,
+        "Original Publication Year": doc.get("first_publish_year"),
+        "cover_url": f"https://covers.openlibrary.org/b/id/{doc['cover_i']}-M.jpg" if doc.get("cover_i") else None,
+        "genres": ", ".join(subjects) if subjects else None,
+    }
+
+
+def enrich_catalog_dataframe(df: pd.DataFrame, progress_bar=None, status_text=None) -> (pd.DataFrame, int):
+    """Enrich books with Open Library data: genres, pages, pub year, cover, and rating."""
+    enriched_df = df.copy()
+
+    # Ensure required columns exist
+    for col in ["Average Rating", "Number of Pages", "Original Publication Year", "cover_url", "genres"]:
+        if col not in enriched_df.columns:
+            enriched_df[col] = None
+
+    total = len(enriched_df)
+    matched_count = 0
+
+    for idx, row in enriched_df.iterrows():
+        title = str(row.get("Title") or "").strip()
+        author = str(row.get("Author") or "").strip()
+
+        if status_text:
+            status_text.text(f"Matching ({idx + 1}/{total}): {title} by {author}...")
+        if progress_bar:
+            progress_bar.progress((idx + 1) / total)
+
+        if not title:
+            continue
+
+        fallback_pg = row.get("Number of Pages")
+        try:
+            fallback_pg = int(fallback_pg) if pd.notnull(fallback_pg) else None
+        except Exception:
+            fallback_pg = None
+
+        doc = fetch_best_book_match(title, author)
+        if doc:
+            data = format_openlibrary_result(doc, fallback_pages=fallback_pg)
+            matched_count += 1
+            if data.get("Average Rating") is not None:
+                enriched_df.at[idx, "Average Rating"] = data["Average Rating"]
+            if data.get("Number of Pages") is not None:
+                enriched_df.at[idx, "Number of Pages"] = data["Number of Pages"]
+            if data.get("Original Publication Year") is not None:
+                enriched_df.at[idx, "Original Publication Year"] = data["Original Publication Year"]
+            if data.get("cover_url"):
+                enriched_df.at[idx, "cover_url"] = data["cover_url"]
+            if data.get("genres"):
+                enriched_df.at[idx, "genres"] = data["genres"]
+
+    return enriched_df, matched_count
+
+
 # ── Database Helpers ──────────────────────────────────────────────────────────
 def df_to_sqlite(df: pd.DataFrame, db_name=DB_NAME, table_name=TABLE_NAME):
     """Store a DataFrame in SQLite table, replacing existing records."""
@@ -382,11 +593,39 @@ st.subheader("Review your table and edit if required:")
 try:
     df = load_table()
 
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns([1, 1, 2])
     col1.metric("Rows", len(df))
     col2.metric("Columns", len(df.columns))
 
-    edited_df = st.data_editor(df, width="stretch", num_rows="dynamic")
+    with col3:
+        if st.button("✨ Enrich with Open Library", type="secondary", help="Fetch genres, page count, publication year, cover image, and average ratings from Open Library"):
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            with st.spinner("Enriching books via Open Library API..."):
+                enriched_df, matches = enrich_catalog_dataframe(
+                    df, progress_bar=progress_bar, status_text=status_text
+                )
+                save_table(enriched_df)
+                status_text.empty()
+                progress_bar.empty()
+                st.success(f"✅ Successfully matched and enriched {matches}/{len(df)} books with Open Library data!")
+                st.rerun()
+
+    # Column configuration for clean data editor presentation
+    column_config = {}
+    if "cover_url" in df.columns:
+        column_config["cover_url"] = st.column_config.ImageColumn("Cover", help="Book cover image from Open Library")
+    if "Average Rating" in df.columns:
+        column_config["Average Rating"] = st.column_config.NumberColumn("Community Rating", format="%.2f")
+    if "genres" in df.columns:
+        column_config["genres"] = st.column_config.TextColumn("Genres / Subjects")
+
+    edited_df = st.data_editor(
+        df,
+        width="stretch",
+        num_rows="dynamic",
+        column_config=column_config,
+    )
 
     if st.button("💾 Save changes", type="primary"):
         save_table(edited_df)
