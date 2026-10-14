@@ -393,13 +393,24 @@ def format_openlibrary_result(doc: dict, fallback_pages: int = None) -> dict:
 
 
 def enrich_catalog_dataframe(df: pd.DataFrame, progress_bar=None, status_text=None) -> (pd.DataFrame, int):
-    """Enrich books with Open Library data: genres, pages, pub year, cover, and rating."""
+    """Enrich books with Open Library data (genres, pages, pub year, cover, rating, ol_key).
+    
+    Preserves any pre-existing user data: only fills columns that are empty / missing.
+    """
     enriched_df = df.copy()
 
-    # Ensure required columns exist
-    for col in ["Average Rating", "Number of Pages", "Original Publication Year", "cover_url", "genres"]:
+    # Ensure required enrichment columns exist
+    for col in ["ol_key", "Average Rating", "Number of Pages", "Original Publication Year", "cover_url", "genres"]:
         if col not in enriched_df.columns:
             enriched_df[col] = None
+
+    def is_blank(val) -> bool:
+        """Check if a value is None, NaN, or whitespace-only."""
+        if pd.isna(val) or val is None:
+            return True
+        if isinstance(val, str) and not val.strip():
+            return True
+        return False
 
     total = len(enriched_df)
     matched_count = 0
@@ -426,16 +437,26 @@ def enrich_catalog_dataframe(df: pd.DataFrame, progress_bar=None, status_text=No
         if doc:
             data = format_openlibrary_result(doc, fallback_pages=fallback_pg)
             matched_count += 1
-            if data.get("Average Rating") is not None:
-                enriched_df.at[idx, "Average Rating"] = data["Average Rating"]
-            if data.get("Number of Pages") is not None:
-                enriched_df.at[idx, "Number of Pages"] = data["Number of Pages"]
-            if data.get("Original Publication Year") is not None:
-                enriched_df.at[idx, "Original Publication Year"] = data["Original Publication Year"]
+
+            # Always save canonical Open Library work key
+            if data.get("ol_key"):
+                enriched_df.at[idx, "ol_key"] = data["ol_key"]
+
+            # Save cover URL and genres
             if data.get("cover_url"):
                 enriched_df.at[idx, "cover_url"] = data["cover_url"]
             if data.get("genres"):
                 enriched_df.at[idx, "genres"] = data["genres"]
+
+            # PRESERVE USER DATA: Only fill if currently missing / blank
+            if is_blank(row.get("Number of Pages")) and data.get("Number of Pages") is not None:
+                enriched_df.at[idx, "Number of Pages"] = data["Number of Pages"]
+
+            if is_blank(row.get("Original Publication Year")) and data.get("Original Publication Year") is not None:
+                enriched_df.at[idx, "Original Publication Year"] = data["Original Publication Year"]
+
+            if is_blank(row.get("Average Rating")) and data.get("Average Rating") is not None:
+                enriched_df.at[idx, "Average Rating"] = data["Average Rating"]
 
     return enriched_df, matched_count
 
