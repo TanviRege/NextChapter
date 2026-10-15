@@ -4,6 +4,10 @@ import sqlite3
 import os
 import re
 import requests
+import html
+import io
+import urllib.parse
+from PIL import Image, ImageDraw, ImageFont
 from typing import Dict, Optional, Union, List
 
 DB_NAME = "catalog.db"
@@ -514,6 +518,496 @@ def save_table(df, db_name=DB_NAME, table_name=TABLE_NAME):
     conn.close()
 
 
+def table_is_enriched(db_name=DB_NAME, table_name=TABLE_NAME) -> bool:
+    """Check if table has Open Library enrichment data (ol_key or genres populated)."""
+    if not table_has_data(db_name, table_name):
+        return False
+    try:
+        conn = sqlite3.connect(db_name)
+        cursor = conn.cursor()
+        cursor.execute(f"PRAGMA table_info({table_name})")
+        cols = [c[1] for c in cursor.fetchall()]
+        if "ol_key" not in cols and "genres" not in cols:
+            conn.close()
+            return False
+        cursor.execute(
+            f"SELECT COUNT(*) FROM {table_name} WHERE (ol_key IS NOT NULL AND TRIM(ol_key) != '') OR (genres IS NOT NULL AND TRIM(genres) != '')"
+        )
+        cnt = cursor.fetchone()[0]
+        conn.close()
+        return cnt > 0
+    except Exception:
+        return False
+
+
+# ── Wrapped Stats Helpers ─────────────────────────────────────────────────────
+def fetch_wrapped_stats(db_name=DB_NAME, table_name=TABLE_NAME) -> Dict[str, object]:
+    """Execute the 5 Wrapped stats SQL queries from NextChapterDev.ipynb."""
+    conn = sqlite3.connect(db_name)
+    cursor = conn.cursor()
+    cursor.execute(f"PRAGMA table_info({table_name})")
+    cols = [col[1] for col in cursor.fetchall()]
+    cover_col = (
+        "CASE WHEN cover_url IS NOT NULL AND cover_url != '' THEN cover_url ELSE NULL END AS cover_url"
+        if "cover_url" in cols
+        else "NULL AS cover_url"
+    )
+
+    # 1. Number of books read this year
+    q1 = f"SELECT COUNT(DISTINCT Title) as total_books FROM {table_name} WHERE Title IS NOT NULL AND TRIM(Title) != ''"
+    df1 = pd.read_sql_query(q1, conn)
+    total_books = int(df1.iloc[0]["total_books"]) if not df1.empty and pd.notnull(df1.iloc[0]["total_books"]) else 0
+
+    # 2. Highest rated books this year (returns all tied for top rating)
+    if "My Rating" in cols:
+        q2 = f"""
+        SELECT Title, Author, [My Rating], {cover_col}
+        FROM {table_name}
+        WHERE [My Rating] = (SELECT MAX([My Rating]) FROM {table_name} WHERE [My Rating] IS NOT NULL)
+          AND [My Rating] IS NOT NULL
+        """
+        df_top_rated = pd.read_sql_query(q2, conn)
+    else:
+        df_top_rated = pd.DataFrame()
+
+    # 3. Most read genres this year (Top 3 by book count)
+    q3 = f"""
+    WITH PrimaryGenres AS (
+        SELECT 
+            Title,
+            TRIM(SUBSTR(genres, 1, INSTR(genres || ',', ',') - 1)) AS primary_genre
+        FROM {table_name}
+        WHERE genres IS NOT NULL AND TRIM(genres) != ''
+    )
+    SELECT 
+        primary_genre AS Genre,
+        COUNT(*) AS [Books Read]
+    FROM PrimaryGenres
+    WHERE primary_genre != ''
+    GROUP BY primary_genre
+    ORDER BY [Books Read] DESC
+    LIMIT 3;
+    """
+    df_top_genres = pd.read_sql_query(q3, conn) if "genres" in cols else pd.DataFrame()
+
+    # 4. Longest book read this year (handles ties, integer cast)
+    if "Number of Pages" in cols:
+        q4 = f"""
+        SELECT 
+            Title,
+            Author,
+            CAST([Number of Pages] AS INTEGER) AS Pages,
+            {cover_col}
+        FROM {table_name}
+        WHERE [Number of Pages] = (
+            SELECT MAX([Number of Pages]) 
+            FROM {table_name} 
+            WHERE [Number of Pages] IS NOT NULL AND [Number of Pages] > 0
+        )
+        """
+        df_longest = pd.read_sql_query(q4, conn)
+    else:
+        df_longest = pd.DataFrame()
+
+    # 5. Most enjoyed genre this year (Top ranked by average rating)
+    if "genres" in cols and "My Rating" in cols:
+        q5 = f"""
+        WITH PrimaryGenres AS (
+            SELECT 
+                Title,
+                [My Rating],
+                TRIM(SUBSTR(genres, 1, INSTR(genres || ',', ',') - 1)) AS primary_genre
+            FROM {table_name}
+            WHERE genres IS NOT NULL AND TRIM(genres) != '' AND [My Rating] IS NOT NULL
+        )
+        SELECT 
+            primary_genre AS Genre,
+            ROUND(AVG([My Rating]), 2) AS [Average Rating],
+            COUNT(*) AS [Books Read],
+            DENSE_RANK() OVER (ORDER BY AVG([My Rating]) DESC, COUNT(*) DESC) AS [Overall Rating Rank]
+        FROM PrimaryGenres
+        WHERE primary_genre != ''
+        GROUP BY primary_genre
+        ORDER BY [Overall Rating Rank]
+        LIMIT 3;
+        """
+        df_enjoyed_genres = pd.read_sql_query(q5, conn)
+    else:
+        df_enjoyed_genres = pd.DataFrame()
+
+    conn.close()
+    return {
+        "total_books": total_books,
+        "top_rated": df_top_rated,
+        "top_genres": df_top_genres,
+        "longest_book": df_longest,
+        "enjoyed_genres": df_enjoyed_genres,
+    }
+
+
+def render_safe_html(html_str: str):
+    """Strip leading/trailing indentation from each line so CommonMark markdown parser
+    does not convert indented tags into code blocks (<pre><code>)."""
+    cleaned = "\n".join(line.strip() for line in html_str.strip().splitlines() if line.strip())
+    st.markdown(cleaned, unsafe_allow_html=True)
+
+
+def generate_wrapped_poster_image(stats: Dict[str, object], archetype: str, archetype_desc: str) -> bytes:
+    """Generate a sleek high-res (900x780) Spotify-style reading recap poster image without emojis."""
+    w, h = 900, 780
+    img = Image.new("RGB", (w, h), color=(15, 15, 20))
+    draw = ImageDraw.Draw(img)
+
+    font_path = "/System/Library/Fonts/Supplemental/Arial.ttf"
+    if not os.path.exists(font_path):
+        font_path = "/System/Library/Fonts/Helvetica.ttc"
+
+    try:
+        f_badge = ImageFont.truetype(font_path, 15)
+        f_title = ImageFont.truetype(font_path, 34)
+        f_sub = ImageFont.truetype(font_path, 16)
+        f_card_title = ImageFont.truetype(font_path, 14)
+        f_stat = ImageFont.truetype(font_path, 28)
+        f_desc = ImageFont.truetype(font_path, 15)
+    except Exception:
+        f_badge = f_title = f_sub = f_card_title = f_stat = f_desc = ImageFont.load_default()
+
+    def clean_text_no_emojis(txt: str) -> str:
+        """Strip all emojis and non-ASCII characters to guarantee clean font rendering without missing-glyph boxes."""
+        if not txt:
+            return ""
+        cleaned = re.sub(r"[^\x20-\x7E]+", " ", str(txt))
+        return re.sub(r"\s+", " ", cleaned).strip()
+
+    # Header Card
+    draw.rounded_rectangle([(40, 30), (w - 40, 140)], radius=16, fill=(24, 24, 32), outline=(45, 45, 55), width=1)
+    draw.text((60, 48), "ANNUAL READING RECAP", font=f_badge, fill=(29, 185, 84))
+    draw.text((60, 70), "NextChapter Wrapped", font=f_title, fill=(255, 255, 255))
+    draw.text((60, 110), "Your Year in Books - Personalized Reading Stats", font=f_sub, fill=(180, 180, 190))
+
+    def draw_panel(x1, y1, x2, y2, bg_color, badge, stat, subtitle, note):
+        draw.rounded_rectangle([(x1, y1), (x2, y2)], radius=18, fill=bg_color)
+        px, py = x1 + 25, y1 + 18
+        draw.text((px, py), clean_text_no_emojis(badge).upper(), font=f_card_title, fill=(255, 255, 255))
+        draw.text((px, py + 26), clean_text_no_emojis(stat), font=f_stat, fill=(255, 255, 255))
+        draw.text((px, py + 64), clean_text_no_emojis(subtitle)[:45], font=f_desc, fill=(255, 255, 255))
+        draw.text((px, py + 88), clean_text_no_emojis(note)[:50], font=f_card_title, fill=(225, 225, 235))
+
+    # Panel 1: Total Books (Left)
+    draw_panel(40, 160, 435, 300, (235, 51, 73), "Reading Volume", f"{stats['total_books']} Books Read", archetype, archetype_desc)
+
+    # Panel 2: Highest Rated (Right)
+    top_r = stats["top_rated"]
+    r_stat = f"{top_r.iloc[0]['My Rating']} / 5 Stars" if not top_r.empty else "Unrated"
+    r_sub = f"{top_r.iloc[0]['Title']} by {top_r.iloc[0]['Author']}" if not top_r.empty else "No rated books"
+    draw_panel(465, 160, w - 40, 300, (248, 87, 166), "Top Rated Read", r_stat, r_sub, "Benchmark reads of the year")
+
+    # Panel 3: Most Read Genre (Left)
+    top_g = stats["top_genres"]
+    g_stat = str(top_g.iloc[0]["Genre"]).title() if not top_g.empty else "None"
+    g_sub = f"{int(top_g.iloc[0]['Books Read'])} books in this genre" if not top_g.empty else "Enrich to reveal"
+    draw_panel(40, 320, 435, 460, (17, 153, 142), "Most Read Genre", g_stat, g_sub, "Your most visited literary world")
+
+    # Panel 4: Longest Book (Right)
+    long_b = stats["longest_book"]
+    l_stat = f"{int(long_b.iloc[0]['Pages'])} Pages" if not long_b.empty and pd.notnull(long_b.iloc[0]["Pages"]) else "N/A"
+    l_sub = f"{long_b.iloc[0]['Title']} by {long_b.iloc[0]['Author']}" if not long_b.empty else "Page count missing"
+    draw_panel(465, 320, w - 40, 460, (101, 78, 163), "Longest Book Read", l_stat, l_sub, "An epic journey of endurance")
+
+    # Panel 5: Highest Rated Genre (Full Width)
+    enj_g = stats["enjoyed_genres"]
+    e_stat = str(enj_g.iloc[0]["Genre"]).title() if not enj_g.empty else "N/A"
+    e_sub = f"{float(enj_g.iloc[0]['Average Rating']):.2f} Avg Rating ({int(enj_g.iloc[0]['Books Read'])} books)" if not enj_g.empty else "Rate more to reveal"
+    draw_panel(40, 480, w - 40, 620, (120, 60, 200), "Highest Rated Genre", e_stat, e_sub, "The genre that earned your highest praise")
+
+    # Footer (clean ASCII, no emojis)
+    draw.text((w // 2 - 110, h - 50), "Generated with NextChapter", font=f_sub, fill=(130, 130, 140))
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def render_spotify_card(
+    badge: str,
+    title: str,
+    big_stat: str,
+    subtitle: str,
+    gradient: str,
+    items_html: str = "",
+    cover_url: str = None,
+    extra_note: str = "",
+) -> str:
+    """Generate clean HTML for a Spotify Wrapped style card without leading line whitespace."""
+    cover_img_html = ""
+    if cover_url:
+        cover_img_html = f'<div style="margin: 14px 0 10px 0;"><img src="{cover_url}" style="height: 140px; border-radius: 8px; box-shadow: 0 10px 20px rgba(0,0,0,0.35); object-fit: cover;" /></div>'
+
+    raw_html = f"""<div style="background: {gradient}; border-radius: 22px; padding: 28px 22px; color: #ffffff; box-shadow: 0 14px 32px rgba(0,0,0,0.22); min-height: 380px; display: flex; flex-direction: column; justify-content: space-between; text-align: center; align-items: center; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; box-sizing: border-box;">
+<div style="width: 100%;">
+<div style="display: inline-block; padding: 4px 14px; background: rgba(255, 255, 255, 0.22); backdrop-filter: blur(6px); border-radius: 999px; font-size: 12px; font-weight: 700; letter-spacing: 1.2px; text-transform: uppercase; margin-bottom: 12px;">{html.escape(badge)}</div>
+<h4 style="margin: 0 0 6px 0; font-size: 18px; font-weight: 600; opacity: 0.92; color: #ffffff;">{html.escape(title)}</h4>
+<div style="font-size: 38px; font-weight: 900; line-height: 1.1; margin: 10px 0; color: #ffffff; text-shadow: 0 2px 10px rgba(0,0,0,0.25);">{big_stat}</div>
+{cover_img_html}
+<p style="margin: 4px 0 12px 0; font-size: 15px; font-weight: 500; opacity: 0.95; color: #ffffff;">{html.escape(subtitle)}</p>
+{items_html}
+</div>
+<div style="font-size: 13px; opacity: 0.78; font-style: italic; margin-top: 10px; color: #ffffff;">{html.escape(extra_note)}</div>
+</div>"""
+    return "\n".join(line.strip() for line in raw_html.strip().splitlines() if line.strip())
+
+
+def render_wrapped_section(stats: Dict[str, object]):
+    """Render the Spotify Wrapped interactive stories, summary poster, and social sharing."""
+    render_safe_html(
+        """
+        <div style="text-align: center; margin: 35px 0 25px 0;">
+            <div style="display: inline-block; padding: 6px 18px; background: #1DB954; color: #ffffff; font-size: 13px; font-weight: 800; border-radius: 999px; letter-spacing: 1.5px; margin-bottom: 8px;">
+                ANNUAL RECAP
+            </div>
+            <h2 style="font-size: 2.3rem; font-weight: 800; margin: 0; color: inherit;">
+                NextChapter Wrapped: Your Year in Books ✨
+            </h2>
+            <p style="font-size: 1.05rem; opacity: 0.8; margin-top: 6px;">
+                Your literary journey, parsed into your signature reading stats.
+            </p>
+        </div>
+        """
+    )
+
+    tab_story, tab_grid = st.tabs([
+        "Wrapped Stories (Interactive)",
+        "All Stats Cards (Grid View)",
+    ])
+
+    total_b = stats["total_books"]
+    df_top_r = stats["top_rated"]
+    df_top_g = stats["top_genres"]
+    df_long = stats["longest_book"]
+    df_enjoy_g = stats["enjoyed_genres"]
+
+    # ── Reader Persona Archetype ──────────────────────────────────────────────
+    if total_b >= 30:
+        archetype = "👑 The Literary Maven"
+        archetype_desc = "Devoured books like oxygen this year. True literary royalty."
+    elif total_b >= 15:
+        archetype = "📖 The Voracious Bookworm"
+        archetype_desc = "Always turning pages, always seeking the next chapter."
+    elif total_b >= 6:
+        archetype = "☕ The Intentional Reader"
+        archetype_desc = "Every read was chosen with care, building a rich personal library."
+    elif total_b >= 1:
+        archetype = "🌱 The Curious Explorer"
+        archetype_desc = "Quality over quantity. Every journey made a lasting mark."
+    else:
+        archetype = "📚 The New Reader"
+        archetype_desc = "Your reading journey is just beginning."
+
+    # ── Format Data for Card 1 (Total Books) ──────────────────────────────────
+    c1_html = render_spotify_card(
+        badge="Slide 1 of 5 • Reading Odyssey",
+        title="YOUR READING VOLUME",
+        big_stat=f"{total_b} Books",
+        subtitle=archetype,
+        gradient="linear-gradient(135deg, #FF0844 0%, #FFB199 100%)",
+        extra_note=archetype_desc,
+    )
+
+    # ── Format Data for Card 2 (Top Rated) ────────────────────────────────────
+    c2_cover = None
+    if not df_top_r.empty:
+        max_rating = df_top_r.iloc[0]["My Rating"]
+        top_titles = [f"★ {r['Title']} by {r['Author']}" for _, r in df_top_r.iterrows()]
+        c2_big = f"★ {max_rating} / 5"
+        c2_sub = f"{len(df_top_r)} Top-Rated Read{'s' if len(df_top_r) > 1 else ''}"
+        c2_items = "<div style='font-size: 14px; text-align: left; background: rgba(0,0,0,0.2); padding: 10px 14px; border-radius: 12px; margin-top: 10px; max-height: 120px; overflow-y: auto;'>"
+        for t in top_titles:
+            c2_items += f"<div style='margin-bottom: 4px;'>{html.escape(t)}</div>"
+        c2_items += "</div>"
+        if "cover_url" in df_top_r.columns and pd.notnull(df_top_r.iloc[0]["cover_url"]):
+            c2_cover = str(df_top_r.iloc[0]["cover_url"])
+    else:
+        c2_big = "Unrated"
+        c2_sub = "No ratings entered yet"
+        c2_items = ""
+
+    c2_html = render_spotify_card(
+        badge="Slide 2 of 5 • The Crown Jewels",
+        title="YOUR HIGHEST RATED",
+        big_stat=c2_big,
+        subtitle=c2_sub,
+        gradient="linear-gradient(135deg, #F857A6 0%, #FF5858 100%)",
+        items_html=c2_items,
+        cover_url=c2_cover,
+        extra_note="The reads that set the benchmark this year.",
+    )
+
+    # ── Format Data for Card 3 (Most Read Genres) ─────────────────────────────
+    if not df_top_g.empty:
+        top_genre_name = str(df_top_g.iloc[0]["Genre"]).title()
+        c3_big = top_genre_name
+        c3_sub = f"{int(df_top_g.iloc[0]['Books Read'])} books in this genre"
+        c3_items = "<div style='font-size: 14px; text-align: left; background: rgba(0,0,0,0.2); padding: 10px 14px; border-radius: 12px; margin-top: 10px;'>"
+        for idx, r in df_top_g.iterrows():
+            medal = ["🥇", "🥈", "🥉"][idx] if idx < 3 else "•"
+            c3_items += f"<div style='margin-bottom: 4px;'><b>{medal} #{idx+1} {html.escape(str(r['Genre']).title())}</b> — {int(r['Books Read'])} book(s)</div>"
+        c3_items += "</div>"
+    else:
+        c3_big = "No Genres"
+        c3_sub = "Enrich with Open Library to uncover genres"
+        c3_items = ""
+
+    c3_html = render_spotify_card(
+        badge="Slide 3 of 5 • Genre Obsession",
+        title="MOST READ GENRE",
+        big_stat=c3_big,
+        subtitle=c3_sub,
+        gradient="linear-gradient(135deg, #11998E 0%, #38EF7D 100%)",
+        items_html=c3_items,
+        extra_note="The literary world you couldn't stay away from.",
+    )
+
+    # ── Format Data for Card 4 (Longest Book) ─────────────────────────────────
+    c4_cover = None
+    if not df_long.empty and pd.notnull(df_long.iloc[0]["Pages"]):
+        max_pages = int(df_long.iloc[0]["Pages"])
+        book_title = str(df_long.iloc[0]["Title"])
+        book_author = str(df_long.iloc[0]["Author"])
+        c4_big = f"{max_pages} Pages"
+        c4_sub = f"{book_title} by {book_author}"
+        if "cover_url" in df_long.columns and pd.notnull(df_long.iloc[0]["cover_url"]):
+            c4_cover = str(df_long.iloc[0]["cover_url"])
+    else:
+        c4_big = "—"
+        c4_sub = "Page numbers missing"
+
+    c4_html = render_spotify_card(
+        badge="Slide 4 of 5 • The Marathon Read",
+        title="YOUR LONGEST BOOK",
+        big_stat=c4_big,
+        subtitle=c4_sub,
+        gradient="linear-gradient(135deg, #654EA3 0%, #EAAFC8 100%)",
+        cover_url=c4_cover,
+        extra_note="A journey of endurance and imagination.",
+    )
+
+    # ── Format Data for Card 5 (Most Enjoyed Genre) ───────────────────────────
+    if not df_enjoy_g.empty:
+        top_enjoyed = str(df_enjoy_g.iloc[0]["Genre"]).title()
+        avg_score = float(df_enjoy_g.iloc[0]["Average Rating"])
+        b_count = int(df_enjoy_g.iloc[0]["Books Read"])
+        c5_big = top_enjoyed
+        c5_sub = f"★ {avg_score:.2f} Avg Rating ({b_count} book{'s' if b_count > 1 else ''})"
+    else:
+        c5_big = "—"
+        c5_sub = "Rate more books to reveal your top genre"
+
+    c5_html = render_spotify_card(
+        badge="Slide 5 of 5 • Genre Soulmate",
+        title="HIGHEST RATED GENRE",
+        big_stat=c5_big,
+        subtitle=c5_sub,
+        gradient="linear-gradient(135deg, #2E0854 0%, #9B51E0 100%)",
+        extra_note="The genre that consistently earned your highest praise.",
+    )
+
+    cards = [c1_html, c2_html, c3_html, c4_html, c5_html]
+
+    # Generate downloadable poster bytes
+    poster_png_bytes = generate_wrapped_poster_image(stats, archetype, archetype_desc)
+
+    # ── TAB 1: Story Mode ─────────────────────────────────────────────────────
+    with tab_story:
+        current_idx = st.session_state.get("wrapped_slide", 0)
+        current_idx = max(0, min(current_idx, len(cards) - 1))
+
+        # Spotify style progress bar indicators
+        progress_cols_html = "<div style='display: flex; gap: 8px; margin-bottom: 20px;'>"
+        for i in range(len(cards)):
+            opacity = "1.0" if i == current_idx else "0.3"
+            color = "#1DB954" if i == current_idx else "#ffffff"
+            progress_cols_html += f"<div style='flex: 1; height: 5px; border-radius: 4px; background: {color}; opacity: {opacity}; transition: all 0.3s;'></div>"
+        progress_cols_html += "</div>"
+        render_safe_html(progress_cols_html)
+
+        # Center the active story card
+        c_left, c_center, c_right = st.columns([1, 2.2, 1])
+        with c_center:
+            render_safe_html(cards[current_idx])
+
+            # Story navigation buttons
+            st.markdown("<div style='margin-top: 18px;'></div>", unsafe_allow_html=True)
+            nav1, nav2, nav3 = st.columns([1, 1.4, 1])
+
+            with nav1:
+                if st.button("◀ Previous", key="btn_prev_slide", disabled=(current_idx == 0)):
+                    st.session_state["wrapped_slide"] = current_idx - 1
+                    st.rerun()
+
+            with nav2:
+                st.markdown(
+                    f"<p style='text-align: center; margin-top: 6px; font-weight: 600; font-size: 14px;'>Story {current_idx + 1} of {len(cards)}</p>",
+                    unsafe_allow_html=True,
+                )
+
+            with nav3:
+                if current_idx < len(cards) - 1:
+                    if st.button("Next ▶", key="btn_next_slide", type="primary"):
+                        st.session_state["wrapped_slide"] = current_idx + 1
+                        st.rerun()
+                else:
+                    if st.button("↺ Replay", key="btn_replay_slide", type="primary"):
+                        st.session_state["wrapped_slide"] = 0
+                        st.rerun()
+
+    # ── TAB 2: Grid View (All Cards Poster) ───────────────────────────────────
+    with tab_grid:
+        render_safe_html(
+            """
+            <div style="background: linear-gradient(135deg, #121212 0%, #1E1E24 100%); border-radius: 20px; padding: 22px 28px; color: #ffffff; margin-bottom: 25px; border: 1px solid #333333;">
+                <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap;">
+                    <div>
+                        <h3 style="margin: 0; color: #1DB954; font-size: 24px;">📊 NEXTCHAPTER WRAPPED POSTER</h3>
+                        <p style="margin: 4px 0 0 0; opacity: 0.8; font-size: 14px;">Your complete reading year snapshot.</p>
+                    </div>
+                    <div style="font-size: 14px; font-weight: 700; background: rgba(255,255,255,0.1); padding: 6px 14px; border-radius: 999px;">
+                        YEAR IN REVIEW
+                    </div>
+                </div>
+            </div>
+            """
+        )
+
+        row1_col1, row1_col2 = st.columns(2)
+        with row1_col1:
+            render_safe_html(c1_html)
+        with row1_col2:
+            render_safe_html(c2_html)
+
+        st.markdown("<div style='margin-top: 20px;'></div>", unsafe_allow_html=True)
+
+        row2_col1, row2_col2, row2_col3 = st.columns(3)
+        with row2_col1:
+            render_safe_html(c3_html)
+        with row2_col2:
+            render_safe_html(c4_html)
+        with row2_col3:
+            render_safe_html(c5_html)
+
+        st.markdown("<div style='margin-top: 25px;'></div>", unsafe_allow_html=True)
+        st.download_button(
+            label="📥 Download Wrapped Poster (PNG)",
+            data=poster_png_bytes,
+            file_name="NextChapter_Reading_Wrapped.png",
+            mime="image/png",
+            type="primary",
+            key="btn_download_poster_grid",
+        )
+
+
+
+
+
 # ── Page config ──────────────────────────────────────────────────────────────
 st.set_page_config(page_title="NextChapter", page_icon="📚", layout="wide")
 
@@ -561,6 +1055,8 @@ with tab_upload:
         if st.button("Import CSV to SQLite", type="primary", key="btn_import_csv"):
             try:
                 df_imported = csv_to_sqlite(tmp_path)
+                st.session_state["show_wrapped"] = False
+                st.session_state["is_enriched"] = False
                 st.success(
                     f"✅ Imported **{len(df_imported)} rows × {len(df_imported.columns)} columns** "
                     f"into `{TABLE_NAME}`"
@@ -589,6 +1085,8 @@ with tab_paste:
                 else:
                     df_goodreads = to_goodreads_df(parsed_df)
                     df_to_sqlite(df_goodreads)
+                    st.session_state["show_wrapped"] = False
+                    st.session_state["is_enriched"] = False
                     st.success(
                         f"✅ Parsed and imported **{len(df_goodreads)} books** into `{TABLE_NAME}`!"
                     )
@@ -601,12 +1099,42 @@ with tab_paste:
             except Exception as e:
                 st.error(f"Text parsing failed: {e}")
 
-# ── Editable table ────────────────────────────────────────────────────────────
+# ── Check Data Presence ───────────────────────────────────────────────────────
 has_data = table_has_data()
 
 if not has_data:
+    st.session_state["show_wrapped"] = False
+    st.session_state["is_enriched"] = False
     st.stop()
 
+# ── Step 2: Mandatory Enrichment ──────────────────────────────────────────────
+is_enriched = st.session_state.get("is_enriched", False) or table_is_enriched()
+
+if not is_enriched:
+    st.divider()
+    st.subheader("Step 2: Enrich with Open Library")
+    st.info(
+        "📚 **Enrichment is required to proceed.** "
+        "Click the button below to match your books against Open Library and fetch genres, page counts, community ratings, and cover images needed for your catalog and Wrapped stats."
+    )
+    if st.button("✨ Enrich with Open Library to Proceed", type="primary", key="btn_enrich_mandatory"):
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        with st.spinner("Enriching books via Open Library API..."):
+            raw_df = load_table()
+            enriched_df, matches = enrich_catalog_dataframe(
+                raw_df, progress_bar=progress_bar, status_text=status_text
+            )
+            save_table(enriched_df)
+            status_text.empty()
+            progress_bar.empty()
+            st.session_state["is_enriched"] = True
+            st.session_state["show_wrapped"] = False
+            st.success(f"✅ Successfully matched and enriched {matches}/{len(raw_df)} books with Open Library data!")
+            st.rerun()
+    st.stop()
+
+# ── Step 3: Editable Table & Wrapped Recap ────────────────────────────────────
 st.divider()
 
 st.subheader("Review your table and edit if required:")
@@ -619,7 +1147,7 @@ try:
     col2.metric("Columns", len(df.columns))
 
     with col3:
-        if st.button("✨ Enrich with Open Library", type="secondary", help="Fetch genres, page count, publication year, cover image, and average ratings from Open Library"):
+        if st.button("🔄 Re-enrich with Open Library", type="secondary", help="Re-fetch genres, page count, publication year, cover image, and average ratings from Open Library"):
             progress_bar = st.progress(0)
             status_text = st.empty()
             with st.spinner("Enriching books via Open Library API..."):
@@ -629,6 +1157,7 @@ try:
                 save_table(enriched_df)
                 status_text.empty()
                 progress_bar.empty()
+                st.session_state["is_enriched"] = True
                 st.success(f"✅ Successfully matched and enriched {matches}/{len(df)} books with Open Library data!")
                 st.rerun()
 
@@ -648,9 +1177,32 @@ try:
         column_config=column_config,
     )
 
-    if st.button("💾 Save changes", type="primary"):
-        save_table(edited_df)
-        st.success("Changes saved to database.")
+    btn_col1, btn_col2 = st.columns([1, 2])
+    with btn_col1:
+        if st.button("💾 Save changes", type="secondary"):
+            save_table(edited_df)
+            st.session_state["show_wrapped"] = False
+            st.success("Changes saved to database.")
+
+    with btn_col2:
+        if st.button(
+            "🎉 Save & Generate Wrapped ✨",
+            type="primary",
+            help="Save your table and generate your Spotify Wrapped style reading recap!",
+        ):
+            save_table(edited_df)
+            st.session_state["show_wrapped"] = True
+            st.session_state["wrapped_slide"] = 0
+            st.balloons()
+            st.rerun()
+
+    if st.session_state.get("show_wrapped", False):
+        st.divider()
+        try:
+            stats = fetch_wrapped_stats()
+            render_wrapped_section(stats)
+        except Exception as err:
+            st.error(f"Could not generate Wrapped stats: {err}")
 
 except Exception as e:
     st.error(f"Could not load table: {e}")
