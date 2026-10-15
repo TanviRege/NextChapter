@@ -694,8 +694,10 @@ def fetch_wrapped_stats(db_name=DB_NAME, table_name=TABLE_NAME) -> Dict[str, obj
         WITH SplitGenres AS (
             SELECT 
                 Title,
+                Author,
                 [My Rating],
                 genres,
+                {cover_col},
                 TRIM(SUBSTR(genres, 1, INSTR(genres || ',', ',') - 1)) AS genre_1,
                 CASE 
                     WHEN INSTR(genres, ',') > 0 THEN 
@@ -721,7 +723,9 @@ def fetch_wrapped_stats(db_name=DB_NAME, table_name=TABLE_NAME) -> Dict[str, obj
         CandidateGenres AS (
             SELECT 
                 Title,
+                Author,
                 [My Rating],
+                cover_url,
                 genres,
                 CASE 
                     WHEN LOWER(genre_1) IN ('fiction', 'general', 'fiction / general') THEN
@@ -738,7 +742,9 @@ def fetch_wrapped_stats(db_name=DB_NAME, table_name=TABLE_NAME) -> Dict[str, obj
         PrimaryGenres AS (
             SELECT 
                 Title,
+                Author,
                 [My Rating],
+                cover_url,
                 CASE 
                     WHEN LOWER(candidate_genre) LIKE 'fiction / %' THEN TRIM(SUBSTR(candidate_genre, 11))
                     ELSE candidate_genre
@@ -749,6 +755,8 @@ def fetch_wrapped_stats(db_name=DB_NAME, table_name=TABLE_NAME) -> Dict[str, obj
             primary_genre AS Genre,
             ROUND(AVG([My Rating]), 2) AS [Average Rating],
             COUNT(*) AS [Books Read],
+            GROUP_CONCAT(DISTINCT Title || CASE WHEN Author IS NOT NULL AND TRIM(Author) != '' THEN ' by ' || Author ELSE '' END) AS [Book Titles],
+            MAX(cover_url) AS cover_url,
             DENSE_RANK() OVER (ORDER BY AVG([My Rating]) DESC, COUNT(*) DESC) AS [Overall Rating Rank]
         FROM PrimaryGenres
         WHERE primary_genre != ''
@@ -842,7 +850,18 @@ def generate_wrapped_poster_image(stats: Dict[str, object], archetype: str, arch
     # Panel 5: Highest Rated Genre (Full Width)
     enj_g = stats["enjoyed_genres"]
     e_stat = str(enj_g.iloc[0]["Genre"]).title() if not enj_g.empty else "N/A"
-    e_sub = f"{float(enj_g.iloc[0]['Average Rating']):.2f} Avg Rating ({int(enj_g.iloc[0]['Books Read'])} books)" if not enj_g.empty else "Rate more to reveal"
+    if not enj_g.empty:
+        r_avg = float(enj_g.iloc[0]["Average Rating"])
+        b_titles = str(enj_g.iloc[0].get("Book Titles") or "").strip()
+        first_title = b_titles.split(",")[0].strip() if b_titles else ""
+        if first_title:
+            if len(first_title) > 42:
+                first_title = first_title[:39] + "..."
+            e_sub = f"{r_avg:.2f} Avg Rating - {first_title}"
+        else:
+            e_sub = f"{r_avg:.2f} Avg Rating"
+    else:
+        e_sub = "Rate more to reveal"
     draw_panel(40, 480, w - 40, 620, (120, 60, 200), "Highest Rated Genre", e_stat, e_sub, "The genre that earned your highest praise")
 
     # Footer (clean ASCII, no emojis)
@@ -1017,12 +1036,31 @@ def render_wrapped_section(stats: Dict[str, object]):
     )
 
     # ── Format Data for Card 5 (Most Enjoyed Genre) ───────────────────────────
+    c5_cover = None
+    c5_items = ""
     if not df_enjoy_g.empty:
         top_enjoyed = str(df_enjoy_g.iloc[0]["Genre"]).title()
         avg_score = float(df_enjoy_g.iloc[0]["Average Rating"])
         b_count = int(df_enjoy_g.iloc[0]["Books Read"])
+        raw_titles = str(df_enjoy_g.iloc[0].get("Book Titles") or "").strip()
         c5_big = top_enjoyed
-        c5_sub = f"★ {avg_score:.2f} Avg Rating ({b_count} book{'s' if b_count > 1 else ''})"
+
+        if raw_titles:
+            titles_list = [t.strip() for t in raw_titles.split(",") if t.strip()]
+            if len(titles_list) == 1:
+                c5_sub = f"★ {avg_score:.2f} Avg Rating • {titles_list[0]}"
+            else:
+                c5_sub = f"★ {avg_score:.2f} Avg Rating • Led by {titles_list[0]}"
+
+            c5_items = "<div style='font-size: 14px; text-align: left; background: rgba(0,0,0,0.2); padding: 10px 14px; border-radius: 12px; margin-top: 10px; max-height: 120px; overflow-y: auto;'>"
+            for t in titles_list:
+                c5_items += f"<div style='margin-bottom: 4px;'>{html.escape(t)}</div>"
+            c5_items += "</div>"
+        else:
+            c5_sub = f"★ {avg_score:.2f} Avg Rating"
+
+        if "cover_url" in df_enjoy_g.columns and pd.notnull(df_enjoy_g.iloc[0]["cover_url"]):
+            c5_cover = str(df_enjoy_g.iloc[0]["cover_url"])
     else:
         c5_big = "—"
         c5_sub = "Rate more books to reveal your top genre"
@@ -1033,6 +1071,8 @@ def render_wrapped_section(stats: Dict[str, object]):
         big_stat=c5_big,
         subtitle=c5_sub,
         gradient="linear-gradient(135deg, #2E0854 0%, #9B51E0 100%)",
+        items_html=c5_items,
+        cover_url=c5_cover,
         extra_note="The genre that consistently earned your highest praise.",
     )
 
@@ -1144,7 +1184,7 @@ if "initialized" not in st.session_state:
 st.title("NextChapter 📚")
 
 # ── Import section ────────────────────────────────────────────────────────────
-st.markdown("### Upload CSV/Paste Your Reading List")
+st.markdown("### Step 1: Upload CSV/Paste Your Reading List")
 st.markdown(
     "<p style='font-size: 15px; color: gray; margin-top: -10px;'>"
     "Ratings should be on a scale of 1: Did Not Enjoy to 5: Loved It! (ratings given out of 10 will be divided by 2)."
