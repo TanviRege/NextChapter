@@ -1125,6 +1125,16 @@ def render_wrapped_section(stats: Dict[str, object]):
                         st.session_state["wrapped_slide"] = 0
                         st.rerun()
 
+            st.markdown("<div style='margin-top: 24px;'></div>", unsafe_allow_html=True)
+            st.download_button(
+                label="📥 Download Wrapped Poster (PNG)",
+                data=poster_png_bytes,
+                file_name="NextChapter_Reading_Wrapped.png",
+                mime="image/png",
+                use_container_width=True,
+                key="btn_download_poster_story",
+            )
+
     # ── TAB 2: Grid View (All Cards Poster) ───────────────────────────────────
     with tab_grid:
         render_safe_html(
@@ -1239,7 +1249,7 @@ with tab_paste:
         label_visibility="collapsed",
     )
 
-    if st.button("Parse & Import to SQLite", type="primary", key="btn_parse_text"):
+    if st.button("Proceed", type="primary", key="btn_parse_text"):
         if not user_text.strip():
             st.warning("Please paste some text first.")
         else:
