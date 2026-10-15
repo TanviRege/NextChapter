@@ -236,10 +236,11 @@ def to_goodreads_df(parsed_df: pd.DataFrame) -> pd.DataFrame:
 
 # ── Open Library Enrichment Helpers ───────────────────────────────────────────
 PRIORITY_GENRES = [
-    "historical fiction", "science fiction", "fiction", "nonfiction", "romance",
-    "thriller", "mystery", "suspense", "war", "family", "art", "history",
-    "biography", "autobiography", "memoir", "science", "fantasy", "crime",
-    "horror", "adventure", "poetry", "drama", "philosophy", "psychology", "politics",
+    "historical fiction", "science fiction", "romance", "fantasy",
+    "thriller", "mystery", "suspense", "crime", "horror", "adventure",
+    "history", "biography", "autobiography", "memoir", "war", "family",
+    "philosophy", "psychology", "politics", "drama", "poetry", "science", "art",
+    "nonfiction",
 ]
 
 
@@ -249,7 +250,12 @@ def clean_and_prioritize_subjects(
     times: list = None,
     limit: int = 5,
 ) -> list:
-    """Filter, clean, and prioritize subjects matching priority genres."""
+    """Filter, clean, and prioritize subjects matching priority genres.
+    
+    Deprioritizes generic 'fiction' so that meaningful, specific genres
+    (e.g., historical fiction, fantasy, thriller) are prioritized first.
+    'fiction' is only placed first if it is the sole subject available.
+    """
     if not raw_subjects:
         return []
     places_set = {str(p).lower().strip() for p in (places or []) if p}
@@ -260,10 +266,17 @@ def clean_and_prioritize_subjects(
     )
     seen = set()
     cleaned = []
+    has_generic_fiction = False
+
     for item in raw_subjects:
         if not item or not isinstance(item, str):
             continue
         s = item.lower().strip()
+        # Clean prefix like 'fiction / ' or 'fiction - '
+        s = re.sub(r"^fiction\s*[/–—\-]\s*", "", s).strip()
+        if s in ("fiction", "general", "general fiction"):
+            has_generic_fiction = True
+            continue
         if any(bad in s for bad in [":", "http", "fast (", "(ocolc)", "new york times", "bestseller"]):
             continue
         if s in seen:
@@ -296,6 +309,14 @@ def clean_and_prioritize_subjects(
         selected_words.update(words)
         if len(selected) >= limit:
             break
+
+    # If no specific genres were found, fallback to 'fiction' if present
+    if not selected and has_generic_fiction:
+        selected.append("fiction")
+    elif has_generic_fiction and len(selected) < limit:
+        # Append generic fiction to the end so it never overrides specific genres as primary
+        selected.append("fiction")
+
     return selected
 
 
@@ -545,6 +566,20 @@ def fetch_wrapped_stats(db_name=DB_NAME, table_name=TABLE_NAME) -> Dict[str, obj
     """Execute the 5 Wrapped stats SQL queries from NextChapterDev.ipynb."""
     conn = sqlite3.connect(db_name)
     cursor = conn.cursor()
+    cursor.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+        (table_name,),
+    )
+    if not cursor.fetchone():
+        conn.close()
+        return {
+            "total_books": 0,
+            "top_rated": pd.DataFrame(),
+            "top_genres": pd.DataFrame(),
+            "longest_book": pd.DataFrame(),
+            "enjoyed_genres": pd.DataFrame(),
+        }
+
     cursor.execute(f"PRAGMA table_info({table_name})")
     cols = [col[1] for col in cursor.fetchall()]
     cover_col = (
@@ -570,14 +605,58 @@ def fetch_wrapped_stats(db_name=DB_NAME, table_name=TABLE_NAME) -> Dict[str, obj
     else:
         df_top_rated = pd.DataFrame()
 
-    # 3. Most read genres this year (Top 3 by book count)
+    # 3. Most read genres this year (Top 3 by book count, ignoring generic 'fiction' if specific genres exist)
     q3 = f"""
-    WITH PrimaryGenres AS (
+    WITH SplitGenres AS (
         SELECT 
             Title,
-            TRIM(SUBSTR(genres, 1, INSTR(genres || ',', ',') - 1)) AS primary_genre
+            genres,
+            TRIM(SUBSTR(genres, 1, INSTR(genres || ',', ',') - 1)) AS genre_1,
+            CASE 
+                WHEN INSTR(genres, ',') > 0 THEN 
+                    TRIM(SUBSTR(
+                        SUBSTR(genres, INSTR(genres, ',') + 1), 
+                        1, 
+                        INSTR(SUBSTR(genres, INSTR(genres, ',') + 1) || ',', ',') - 1
+                    ))
+                ELSE ''
+            END AS genre_2,
+            CASE 
+                WHEN INSTR(SUBSTR(genres, INSTR(genres, ',') + 1), ',') > 0 THEN 
+                    TRIM(SUBSTR(
+                        SUBSTR(SUBSTR(genres, INSTR(genres, ',') + 1), INSTR(SUBSTR(genres, INSTR(genres, ',') + 1), ',') + 1),
+                        1,
+                        INSTR(SUBSTR(SUBSTR(genres, INSTR(genres, ',') + 1), INSTR(SUBSTR(genres, INSTR(genres, ',') + 1), ',') + 1) || ',', ',') - 1
+                    ))
+                ELSE ''
+            END AS genre_3
         FROM {table_name}
         WHERE genres IS NOT NULL AND TRIM(genres) != ''
+    ),
+    CandidateGenres AS (
+        SELECT 
+            Title,
+            genres,
+            CASE 
+                WHEN LOWER(genre_1) IN ('fiction', 'general', 'fiction / general') THEN
+                    CASE 
+                        WHEN genre_2 != '' AND LOWER(genre_2) NOT IN ('fiction', 'general', 'fiction / general') THEN genre_2
+                        WHEN genre_3 != '' AND LOWER(genre_3) NOT IN ('fiction', 'general', 'fiction / general') THEN genre_3
+                        WHEN genre_2 != '' THEN genre_2
+                        ELSE genre_1
+                    END
+                ELSE genre_1
+            END AS candidate_genre
+        FROM SplitGenres
+    ),
+    PrimaryGenres AS (
+        SELECT 
+            Title,
+            CASE 
+                WHEN LOWER(candidate_genre) LIKE 'fiction / %' THEN TRIM(SUBSTR(candidate_genre, 11))
+                ELSE candidate_genre
+            END AS primary_genre
+        FROM CandidateGenres
     )
     SELECT 
         primary_genre AS Genre,
@@ -609,16 +688,62 @@ def fetch_wrapped_stats(db_name=DB_NAME, table_name=TABLE_NAME) -> Dict[str, obj
     else:
         df_longest = pd.DataFrame()
 
-    # 5. Most enjoyed genre this year (Top ranked by average rating)
+    # 5. Most enjoyed genre this year (Top ranked by average rating, ignoring generic 'fiction' if specific genres exist)
     if "genres" in cols and "My Rating" in cols:
         q5 = f"""
-        WITH PrimaryGenres AS (
+        WITH SplitGenres AS (
             SELECT 
                 Title,
                 [My Rating],
-                TRIM(SUBSTR(genres, 1, INSTR(genres || ',', ',') - 1)) AS primary_genre
+                genres,
+                TRIM(SUBSTR(genres, 1, INSTR(genres || ',', ',') - 1)) AS genre_1,
+                CASE 
+                    WHEN INSTR(genres, ',') > 0 THEN 
+                        TRIM(SUBSTR(
+                            SUBSTR(genres, INSTR(genres, ',') + 1), 
+                            1, 
+                            INSTR(SUBSTR(genres, INSTR(genres, ',') + 1) || ',', ',') - 1
+                        ))
+                    ELSE ''
+                END AS genre_2,
+                CASE 
+                    WHEN INSTR(SUBSTR(genres, INSTR(genres, ',') + 1), ',') > 0 THEN 
+                        TRIM(SUBSTR(
+                            SUBSTR(SUBSTR(genres, INSTR(genres, ',') + 1), INSTR(SUBSTR(genres, INSTR(genres, ',') + 1), ',') + 1),
+                            1,
+                            INSTR(SUBSTR(SUBSTR(genres, INSTR(genres, ',') + 1), INSTR(SUBSTR(genres, INSTR(genres, ',') + 1), ',') + 1) || ',', ',') - 1
+                        ))
+                    ELSE ''
+                END AS genre_3
             FROM {table_name}
             WHERE genres IS NOT NULL AND TRIM(genres) != '' AND [My Rating] IS NOT NULL
+        ),
+        CandidateGenres AS (
+            SELECT 
+                Title,
+                [My Rating],
+                genres,
+                CASE 
+                    WHEN LOWER(genre_1) IN ('fiction', 'general', 'fiction / general') THEN
+                        CASE 
+                            WHEN genre_2 != '' AND LOWER(genre_2) NOT IN ('fiction', 'general', 'fiction / general') THEN genre_2
+                            WHEN genre_3 != '' AND LOWER(genre_3) NOT IN ('fiction', 'general', 'fiction / general') THEN genre_3
+                            WHEN genre_2 != '' THEN genre_2
+                            ELSE genre_1
+                        END
+                    ELSE genre_1
+                END AS candidate_genre
+            FROM SplitGenres
+        ),
+        PrimaryGenres AS (
+            SELECT 
+                Title,
+                [My Rating],
+                CASE 
+                    WHEN LOWER(candidate_genre) LIKE 'fiction / %' THEN TRIM(SUBSTR(candidate_genre, 11))
+                    ELSE candidate_genre
+                END AS primary_genre
+            FROM CandidateGenres
         )
         SELECT 
             primary_genre AS Genre,
