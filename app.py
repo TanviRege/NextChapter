@@ -749,17 +749,32 @@ def fetch_wrapped_stats(db_name=DB_NAME, table_name=TABLE_NAME) -> Dict[str, obj
                     ELSE candidate_genre
                 END AS primary_genre
             FROM CandidateGenres
+        ),
+        GenreAgg AS (
+            SELECT 
+                primary_genre AS Genre,
+                ROUND(AVG([My Rating]), 2) AS [Average Rating],
+                COUNT(*) AS [Books Read],
+                MAX(cover_url) AS cover_url
+            FROM PrimaryGenres
+            WHERE primary_genre != ''
+            GROUP BY primary_genre
+        ),
+        DistinctGenreBooks AS (
+            SELECT DISTINCT
+                primary_genre,
+                Title || CASE WHEN Author IS NOT NULL AND TRIM(Author) != '' THEN ' by ' || Author ELSE '' END AS book_title
+            FROM PrimaryGenres
+            WHERE primary_genre != ''
         )
         SELECT 
-            primary_genre AS Genre,
-            ROUND(AVG([My Rating]), 2) AS [Average Rating],
-            COUNT(*) AS [Books Read],
-            GROUP_CONCAT(DISTINCT Title || CASE WHEN Author IS NOT NULL AND TRIM(Author) != '' THEN ' by ' || Author ELSE '' END) AS [Book Titles],
-            MAX(cover_url) AS cover_url,
-            DENSE_RANK() OVER (ORDER BY AVG([My Rating]) DESC, COUNT(*) DESC) AS [Overall Rating Rank]
-        FROM PrimaryGenres
-        WHERE primary_genre != ''
-        GROUP BY primary_genre
+            g.Genre,
+            g.[Average Rating],
+            g.[Books Read],
+            (SELECT GROUP_CONCAT(b.book_title, ' • ') FROM DistinctGenreBooks b WHERE b.primary_genre = g.Genre) AS [Book Titles],
+            g.cover_url,
+            DENSE_RANK() OVER (ORDER BY g.[Average Rating] DESC, g.[Books Read] DESC) AS [Overall Rating Rank]
+        FROM GenreAgg g
         ORDER BY [Overall Rating Rank]
         LIMIT 3;
         """
@@ -785,8 +800,8 @@ def render_safe_html(html_str: str):
 
 
 def generate_wrapped_poster_image(stats: Dict[str, object], archetype: str, archetype_desc: str) -> bytes:
-    """Generate a sleek high-res (900x780) Spotify-style reading recap poster image without emojis."""
-    w, h = 900, 780
+    """Generate a sleek high-res (920x840) reading recap poster image without emojis or truncated text."""
+    w, h = 920, 840
     img = Image.new("RGB", (w, h), color=(15, 15, 20))
     draw = ImageDraw.Draw(img)
 
@@ -798,9 +813,9 @@ def generate_wrapped_poster_image(stats: Dict[str, object], archetype: str, arch
         f_badge = ImageFont.truetype(font_path, 15)
         f_title = ImageFont.truetype(font_path, 34)
         f_sub = ImageFont.truetype(font_path, 16)
-        f_card_title = ImageFont.truetype(font_path, 14)
+        f_card_title = ImageFont.truetype(font_path, 13)
         f_stat = ImageFont.truetype(font_path, 28)
-        f_desc = ImageFont.truetype(font_path, 15)
+        f_desc = ImageFont.truetype(font_path, 14)
     except Exception:
         f_badge = f_title = f_sub = f_card_title = f_stat = f_desc = ImageFont.load_default()
 
@@ -811,40 +826,81 @@ def generate_wrapped_poster_image(stats: Dict[str, object], archetype: str, arch
         cleaned = re.sub(r"[^\x20-\x7E]+", " ", str(txt))
         return re.sub(r"\s+", " ", cleaned).strip()
 
+    def fit_text_lines(text: str, font, max_width: int, max_lines: int = 2) -> List[str]:
+        """Wrap text by words to fit within max_width across up to max_lines. If still too long, add ellipsis."""
+        words = text.split()
+        lines = []
+        curr = ""
+        for word in words:
+            test = f"{curr} {word}".strip()
+            if draw.textlength(test, font=font) <= max_width:
+                curr = test
+            else:
+                if curr:
+                    lines.append(curr)
+                curr = word
+        if curr:
+            lines.append(curr)
+
+        if len(lines) > max_lines:
+            lines = lines[:max_lines]
+            while lines[-1] and draw.textlength(lines[-1] + "...", font=font) > max_width:
+                lines[-1] = lines[-1][:-1].strip()
+            lines[-1] += "..."
+        return lines
+
     # Header Card
-    draw.rounded_rectangle([(40, 30), (w - 40, 140)], radius=16, fill=(24, 24, 32), outline=(45, 45, 55), width=1)
-    draw.text((60, 48), "ANNUAL READING RECAP", font=f_badge, fill=(29, 185, 84))
-    draw.text((60, 70), "NextChapter Wrapped", font=f_title, fill=(255, 255, 255))
-    draw.text((60, 110), "Your Year in Books - Personalized Reading Stats", font=f_sub, fill=(180, 180, 190))
+    draw.rounded_rectangle([(40, 28), (w - 40, 138)], radius=16, fill=(24, 24, 32), outline=(45, 45, 55), width=1)
+    draw.text((60, 46), "ANNUAL READING RECAP", font=f_badge, fill=(59, 130, 246))
+    draw.text((60, 68), "NextChapter Wrapped", font=f_title, fill=(255, 255, 255))
+    draw.text((60, 108), "Your Year in Books - Personalized Reading Stats", font=f_sub, fill=(180, 180, 190))
 
     def draw_panel(x1, y1, x2, y2, bg_color, badge, stat, subtitle, note):
         draw.rounded_rectangle([(x1, y1), (x2, y2)], radius=18, fill=bg_color)
-        px, py = x1 + 25, y1 + 18
-        draw.text((px, py), clean_text_no_emojis(badge).upper(), font=f_card_title, fill=(255, 255, 255))
-        draw.text((px, py + 26), clean_text_no_emojis(stat), font=f_stat, fill=(255, 255, 255))
-        draw.text((px, py + 64), clean_text_no_emojis(subtitle)[:45], font=f_desc, fill=(255, 255, 255))
-        draw.text((px, py + 88), clean_text_no_emojis(note)[:50], font=f_card_title, fill=(225, 225, 235))
+        px = x1 + 24
+        max_w = (x2 - x1) - 48
+
+        # 1. Badge
+        draw.text((px, y1 + 16), clean_text_no_emojis(badge).upper(), font=f_card_title, fill=(255, 255, 255))
+
+        # 2. Big Stat
+        stat_clean = clean_text_no_emojis(stat)
+        draw.text((px, y1 + 38), stat_clean, font=f_stat, fill=(255, 255, 255))
+
+        # 3. Subtitle (wrapped to max 2 lines, no arbitrary slicing)
+        sub_clean = clean_text_no_emojis(subtitle)
+        sub_lines = fit_text_lines(sub_clean, f_desc, max_w, max_lines=2)
+        y_sub = y1 + 76
+        for i, line in enumerate(sub_lines):
+            draw.text((px, y_sub + (i * 18)), line, font=f_desc, fill=(255, 255, 255))
+
+        # 4. Note (wrapped cleanly, positioned below subtitle)
+        y_note = y_sub + (len(sub_lines) * 18) + 6
+        note_clean = clean_text_no_emojis(note)
+        note_lines = fit_text_lines(note_clean, f_card_title, max_w, max_lines=1 if len(sub_lines) > 1 else 2)
+        for i, line in enumerate(note_lines):
+            draw.text((px, y_note + (i * 16)), line, font=f_card_title, fill=(225, 225, 235))
 
     # Panel 1: Total Books (Left)
-    draw_panel(40, 160, 435, 300, (235, 51, 73), "Reading Volume", f"{stats['total_books']} Books Read", archetype, archetype_desc)
+    draw_panel(40, 155, 445, 315, (235, 51, 73), "Reading Volume", f"{stats['total_books']} Books Read", archetype, archetype_desc)
 
     # Panel 2: Highest Rated (Right)
     top_r = stats["top_rated"]
     r_stat = f"{top_r.iloc[0]['My Rating']} / 5 Stars" if not top_r.empty else "Unrated"
     r_sub = f"{top_r.iloc[0]['Title']} by {top_r.iloc[0]['Author']}" if not top_r.empty else "No rated books"
-    draw_panel(465, 160, w - 40, 300, (248, 87, 166), "Top Rated Read", r_stat, r_sub, "Benchmark reads of the year")
+    draw_panel(475, 155, w - 40, 315, (248, 87, 166), "Top Rated Read", r_stat, r_sub, "Benchmark reads of the year")
 
     # Panel 3: Most Read Genre (Left)
     top_g = stats["top_genres"]
     g_stat = str(top_g.iloc[0]["Genre"]).title() if not top_g.empty else "None"
     g_sub = f"{int(top_g.iloc[0]['Books Read'])} books in this genre" if not top_g.empty else "Enrich to reveal"
-    draw_panel(40, 320, 435, 460, (17, 153, 142), "Most Read Genre", g_stat, g_sub, "Your most visited literary world")
+    draw_panel(40, 332, 445, 492, (17, 153, 142), "Most Read Genre", g_stat, g_sub, "Your most visited literary world")
 
     # Panel 4: Longest Book (Right)
     long_b = stats["longest_book"]
     l_stat = f"{int(long_b.iloc[0]['Pages'])} Pages" if not long_b.empty and pd.notnull(long_b.iloc[0]["Pages"]) else "N/A"
     l_sub = f"{long_b.iloc[0]['Title']} by {long_b.iloc[0]['Author']}" if not long_b.empty else "Page count missing"
-    draw_panel(465, 320, w - 40, 460, (101, 78, 163), "Longest Book Read", l_stat, l_sub, "An epic journey of endurance")
+    draw_panel(475, 332, w - 40, 492, (101, 78, 163), "Longest Book Read", l_stat, l_sub, "An epic journey of endurance")
 
     # Panel 5: Highest Rated Genre (Full Width)
     enj_g = stats["enjoyed_genres"]
@@ -852,19 +908,14 @@ def generate_wrapped_poster_image(stats: Dict[str, object], archetype: str, arch
     if not enj_g.empty:
         r_avg = float(enj_g.iloc[0]["Average Rating"])
         b_titles = str(enj_g.iloc[0].get("Book Titles") or "").strip()
-        first_title = b_titles.split(",")[0].strip() if b_titles else ""
-        if first_title:
-            if len(first_title) > 42:
-                first_title = first_title[:39] + "..."
-            e_sub = f"{r_avg:.2f} Avg Rating - {first_title}"
-        else:
-            e_sub = f"{r_avg:.2f} Avg Rating"
+        first_title = b_titles.split(" • ")[0].strip() if " • " in b_titles else b_titles.split(",")[0].strip() if b_titles else ""
+        e_sub = f"{r_avg:.2f} Avg Rating - {first_title}" if first_title else f"{r_avg:.2f} Avg Rating"
     else:
         e_sub = "Rate more to reveal"
-    draw_panel(40, 480, w - 40, 620, (120, 60, 200), "Highest Rated Genre", e_stat, e_sub, "The genre that earned your highest praise")
+    draw_panel(40, 509, w - 40, 669, (120, 60, 200), "Highest Rated Genre", e_stat, e_sub, "The genre that earned your highest praise")
 
     # Footer (clean ASCII, no emojis)
-    draw.text((w // 2 - 110, h - 50), "Generated with NextChapter", font=f_sub, fill=(130, 130, 140))
+    draw.text((w // 2 - 110, h - 45), "Generated with NextChapter", font=f_sub, fill=(130, 130, 140))
 
     buf = io.BytesIO()
     img.save(buf, format="PNG")
@@ -1046,7 +1097,8 @@ def render_wrapped_section(stats: Dict[str, object]):
 
         c5_sub = f"★ {avg_score:.2f} Avg Rating"
         if raw_titles:
-            titles_list = [t.strip() for t in raw_titles.split(",") if t.strip()]
+            delimiter = " • " if " • " in raw_titles else ","
+            titles_list = [t.strip() for t in raw_titles.split(delimiter) if t.strip()]
             c5_items = "<div style='font-size: 14px; text-align: left; background: rgba(0,0,0,0.2); padding: 10px 14px; border-radius: 12px; margin-top: 10px; max-height: 120px; overflow-y: auto;'>"
             for t in titles_list:
                 c5_items += f"<div style='margin-bottom: 4px;'>{html.escape(t)}</div>"
