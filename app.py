@@ -220,7 +220,6 @@ def to_goodreads_df(parsed_df: pd.DataFrame) -> pd.DataFrame:
     out["My Rating"] = parsed_df["My Rating"]
     out["Exclusive Shelf"] = "read"
     out["Read Count"] = 1
-    out["Owned Copies"] = 0
 
     def to_last_first(name: str) -> str:
         if not name or not isinstance(name, str):
