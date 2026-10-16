@@ -871,7 +871,7 @@ def generate_wrapped_poster_image(stats: Dict[str, object], archetype: str, arch
     return buf.getvalue()
 
 
-def render_spotify_card(
+def render_wrapped_card(
     badge: str,
     title: str,
     big_stat: str,
@@ -901,11 +901,11 @@ def render_spotify_card(
 
 
 def render_wrapped_section(stats: Dict[str, object]):
-    """Render the Spotify Wrapped interactive stories, summary poster, and social sharing."""
+    """Render the Wrapped interactive stories, summary poster, and social sharing."""
     render_safe_html(
         """
         <div style="text-align: center; margin: 35px 0 25px 0;">
-            <div style="display: inline-block; padding: 6px 18px; background: #1DB954; color: #ffffff; font-size: 13px; font-weight: 800; border-radius: 999px; letter-spacing: 1.5px; margin-bottom: 8px;">
+            <div style="display: inline-block; padding: 6px 18px; background: #2563EB; color: #ffffff; font-size: 13px; font-weight: 800; border-radius: 999px; letter-spacing: 1.5px; margin-bottom: 8px;">
                 ANNUAL RECAP
             </div>
             <h2 style="font-size: 2.3rem; font-weight: 800; margin: 0; color: inherit;">
@@ -947,7 +947,7 @@ def render_wrapped_section(stats: Dict[str, object]):
         archetype_desc = "Your reading journey is just beginning."
 
     # ── Format Data for Card 1 (Total Books) ──────────────────────────────────
-    c1_html = render_spotify_card(
+    c1_html = render_wrapped_card(
         badge="Slide 1 of 5 • Reading Odyssey",
         title="YOUR READING VOLUME",
         big_stat=f"{total_b} Books",
@@ -974,7 +974,7 @@ def render_wrapped_section(stats: Dict[str, object]):
         c2_sub = "No ratings entered yet"
         c2_items = ""
 
-    c2_html = render_spotify_card(
+    c2_html = render_wrapped_card(
         badge="Slide 2 of 5 • The Crown Jewels",
         title="YOUR HIGHEST RATED",
         big_stat=c2_big,
@@ -1000,7 +1000,7 @@ def render_wrapped_section(stats: Dict[str, object]):
         c3_sub = "Enrich with Open Library to uncover genres"
         c3_items = ""
 
-    c3_html = render_spotify_card(
+    c3_html = render_wrapped_card(
         badge="Slide 3 of 5 • Genre Obsession",
         title="MOST READ GENRE",
         big_stat=c3_big,
@@ -1024,7 +1024,7 @@ def render_wrapped_section(stats: Dict[str, object]):
         c4_big = "—"
         c4_sub = "Page numbers missing"
 
-    c4_html = render_spotify_card(
+    c4_html = render_wrapped_card(
         badge="Slide 4 of 5 • The Marathon Read",
         title="YOUR LONGEST BOOK",
         big_stat=c4_big,
@@ -1044,19 +1044,13 @@ def render_wrapped_section(stats: Dict[str, object]):
         raw_titles = str(df_enjoy_g.iloc[0].get("Book Titles") or "").strip()
         c5_big = top_enjoyed
 
+        c5_sub = f"★ {avg_score:.2f} Avg Rating"
         if raw_titles:
             titles_list = [t.strip() for t in raw_titles.split(",") if t.strip()]
-            if len(titles_list) == 1:
-                c5_sub = f"★ {avg_score:.2f} Avg Rating • {titles_list[0]}"
-            else:
-                c5_sub = f"★ {avg_score:.2f} Avg Rating • Led by {titles_list[0]}"
-
             c5_items = "<div style='font-size: 14px; text-align: left; background: rgba(0,0,0,0.2); padding: 10px 14px; border-radius: 12px; margin-top: 10px; max-height: 120px; overflow-y: auto;'>"
             for t in titles_list:
                 c5_items += f"<div style='margin-bottom: 4px;'>{html.escape(t)}</div>"
             c5_items += "</div>"
-        else:
-            c5_sub = f"★ {avg_score:.2f} Avg Rating"
 
         if "cover_url" in df_enjoy_g.columns and pd.notnull(df_enjoy_g.iloc[0]["cover_url"]):
             c5_cover = str(df_enjoy_g.iloc[0]["cover_url"])
@@ -1064,7 +1058,7 @@ def render_wrapped_section(stats: Dict[str, object]):
         c5_big = "—"
         c5_sub = "Rate more books to reveal your top genre"
 
-    c5_html = render_spotify_card(
+    c5_html = render_wrapped_card(
         badge="Slide 5 of 5 • Genre Soulmate",
         title="HIGHEST RATED GENRE",
         big_stat=c5_big,
@@ -1085,11 +1079,11 @@ def render_wrapped_section(stats: Dict[str, object]):
         current_idx = st.session_state.get("wrapped_slide", 0)
         current_idx = max(0, min(current_idx, len(cards) - 1))
 
-        # Spotify style progress bar indicators
+        # Progress bar indicators
         progress_cols_html = "<div style='display: flex; gap: 8px; margin-bottom: 20px;'>"
         for i in range(len(cards)):
             opacity = "1.0" if i == current_idx else "0.3"
-            color = "#1DB954" if i == current_idx else "#ffffff"
+            color = "#3B82F6" if i == current_idx else "#ffffff"
             progress_cols_html += f"<div style='flex: 1; height: 5px; border-radius: 4px; background: {color}; opacity: {opacity}; transition: all 0.3s;'></div>"
         progress_cols_html += "</div>"
         render_safe_html(progress_cols_html)
@@ -1136,22 +1130,7 @@ def render_wrapped_section(stats: Dict[str, object]):
 
     # ── TAB 2: Grid View (All Cards Poster) ───────────────────────────────────
     with tab_grid:
-        render_safe_html(
-            """
-            <div style="background: linear-gradient(135deg, #121212 0%, #1E1E24 100%); border-radius: 20px; padding: 22px 28px; color: #ffffff; margin-bottom: 25px; border: 1px solid #333333;">
-                <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap;">
-                    <div>
-                        <h3 style="margin: 0; color: #1DB954; font-size: 24px;">📊 NEXTCHAPTER WRAPPED POSTER</h3>
-                        <p style="margin: 4px 0 0 0; opacity: 0.8; font-size: 14px;">Your complete reading year snapshot.</p>
-                    </div>
-                    <div style="font-size: 14px; font-weight: 700; background: rgba(255,255,255,0.1); padding: 6px 14px; border-radius: 999px;">
-                        YEAR IN REVIEW
-                    </div>
-                </div>
-            </div>
-            """
-        )
-
+        st.markdown("<div style='margin-top: 10px;'></div>", unsafe_allow_html=True)
         row1_col1, row1_col2 = st.columns(2)
         with row1_col1:
             render_safe_html(c1_html)
@@ -1185,6 +1164,74 @@ def render_wrapped_section(stats: Dict[str, object]):
 # ── Page config ──────────────────────────────────────────────────────────────
 st.set_page_config(page_title="NextChapter", page_icon="📚", layout="wide")
 
+# ── Custom Royal Blue Theme Styles ───────────────────────────────────────────
+st.markdown(
+    """
+    <style>
+    /* Primary Action Buttons (Proceed, Generate Wrapped, Enrich, Import, etc.) */
+    button[kind="primary"],
+    button[data-testid="baseButton-primary"],
+    div[data-testid="stButton"] > button[kind="primary"],
+    div[data-testid="stDownloadButton"] > button[kind="primary"] {
+        background: linear-gradient(135deg, #1D4ED8 0%, #3B82F6 100%) !important;
+        color: #ffffff !important;
+        border: none !important;
+        border-radius: 12px !important;
+        font-weight: 600 !important;
+        letter-spacing: 0.3px !important;
+        box-shadow: 0 4px 14px rgba(29, 78, 216, 0.38) !important;
+        transition: all 0.25s ease-in-out !important;
+    }
+
+    button[kind="primary"]:hover,
+    button[data-testid="baseButton-primary"]:hover,
+    div[data-testid="stButton"] > button[kind="primary"]:hover,
+    div[data-testid="stDownloadButton"] > button[kind="primary"]:hover {
+        transform: translateY(-2px) !important;
+        box-shadow: 0 6px 20px rgba(37, 99, 235, 0.55) !important;
+        filter: brightness(1.08) !important;
+    }
+
+    button[kind="primary"]:active,
+    button[data-testid="baseButton-primary"]:active {
+        transform: translateY(0) !important;
+        box-shadow: 0 2px 8px rgba(29, 78, 216, 0.3) !important;
+    }
+
+    /* Secondary Action Buttons */
+    button[kind="secondary"],
+    button[data-testid="baseButton-secondary"],
+    div[data-testid="stButton"] > button[kind="secondary"],
+    div[data-testid="stDownloadButton"] > button[kind="secondary"] {
+        border-radius: 12px !important;
+        border: 1px solid rgba(255, 255, 255, 0.18) !important;
+        font-weight: 500 !important;
+        transition: all 0.2s ease-in-out !important;
+    }
+
+    button[kind="secondary"]:hover,
+    button[data-testid="baseButton-secondary"]:hover {
+        border-color: #3B82F6 !important;
+        color: #60A5FA !important;
+        background: rgba(59, 130, 246, 0.08) !important;
+    }
+
+    /* Active Tabs Accent */
+    button[data-baseweb="tab"][aria-selected="true"] {
+        border-bottom-color: #3B82F6 !important;
+        color: #60A5FA !important;
+    }
+
+    /* Text Area & Input Focus Ring */
+    textarea:focus, input:focus {
+        border-color: #3B82F6 !important;
+        box-shadow: 0 0 0 1px #3B82F6 !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 # ── Clear DB on fresh session start ──────────────────────────────────────────
 if "initialized" not in st.session_state:
     if os.path.exists(DB_NAME):
@@ -1192,7 +1239,7 @@ if "initialized" not in st.session_state:
     st.session_state["initialized"] = True
 st.title("NextChapter 📚")
 
-# ── Import section ────────────────────────────────────────────────────────────
+# ── Step 1: Import section ────────────────────────────────────────────────────────────
 st.markdown("### Step 1: Upload CSV/Paste Your Reading List")
 st.markdown(
     "<p style='font-size: 15px; color: gray; margin-top: -10px;'>"
@@ -1201,7 +1248,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-tab_upload, tab_paste = st.tabs(["📁 Upload CSV", "✍️ Paste Text"])
+tab_upload, tab_paste = st.tabs(["Upload CSV", "Paste Text"])
 
 with tab_upload:
     uploaded_file = st.file_uploader(
@@ -1226,7 +1273,7 @@ with tab_upload:
         with open(tmp_path, "wb") as f:
             f.write(uploaded_file.getbuffer())
 
-        if st.button("Import CSV to SQLite", type="primary", key="btn_import_csv"):
+        if st.button("Proceed", type="primary", key="btn_import_csv"):
             try:
                 df_imported = csv_to_sqlite(tmp_path)
                 st.session_state["show_wrapped"] = False
@@ -1288,10 +1335,10 @@ if not is_enriched:
     st.divider()
     st.subheader("Step 2: Enrich with Open Library")
     st.info(
-        "📚 **Enrichment is required to proceed.** "
-        "Click the button below to match your books against Open Library and fetch genres, page counts, community ratings, and cover images needed for your catalog and Wrapped stats."
+        "**Enrichment is required to proceed.** "
+        "Click the button below to match your books against Open Library and fetch genres, page counts, community ratings, and cover images needed for your Wrapped stats."
     )
-    if st.button("✨ Enrich with Open Library to Proceed", type="primary", key="btn_enrich_mandatory"):
+    if st.button("Proceed", type="primary", key="btn_enrich_mandatory"):
         progress_bar = st.progress(0)
         status_text = st.empty()
         with st.spinner("Enriching books via Open Library API..."):
@@ -1360,9 +1407,9 @@ try:
 
     with btn_col2:
         if st.button(
-            "🎉 Save & Generate Wrapped ✨",
+            "Save & Generate Wrapped 🎉",
             type="primary",
-            help="Save your table and generate your Spotify Wrapped style reading recap!",
+            help="Save your table and generate your Reading Wrapped!",
         ):
             save_table(edited_df)
             st.session_state["show_wrapped"] = True
