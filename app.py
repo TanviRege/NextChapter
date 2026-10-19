@@ -42,10 +42,10 @@ def clean_field(text: str) -> str:
     return s.title()
 
 
-def normalize_rating(raw: str) -> int:
+def normalize_rating(raw: str) -> float:
     """Parse and normalize rating (handles /5, /10, clamps to 0-5)."""
     if not raw or not isinstance(raw, str):
-        return 0
+        return 0.0
     s = raw.strip().lower()
 
     slash_match = re.search(r"(\d+\.?\d*)\s*/\s*(\d+)", s)
@@ -57,17 +57,17 @@ def normalize_rating(raw: str) -> int:
         elif denominator == 5:
             value = numerator
         else:
-            value = (numerator / denominator) * 5.0 if denominator > 0 else 0
-        return max(0, min(5, round(value)))
+            value = (numerator / denominator) * 5.0 if denominator > 0 else 0.0
+        return max(0.0, min(5.0, round(value, 2)))
 
     num_match = re.search(r"(\d+\.?\d*)", s)
     if not num_match:
-        return 0
+        return 0.0
 
     value = float(num_match.group(1))
     if value > 5:
         value = value / 2.0
-    return max(0, min(5, round(value)))
+    return max(0.0, min(5.0, round(value, 2)))
 
 
 def normalize_for_dedup(title: str, author: str) -> str:
@@ -217,7 +217,7 @@ def to_goodreads_df(parsed_df: pd.DataFrame) -> pd.DataFrame:
     out = pd.DataFrame(columns=GOODREADS_COLUMNS)
     out["Title"] = parsed_df["Title"]
     out["Author"] = parsed_df["Author"]
-    out["My Rating"] = parsed_df["My Rating"]
+    out["My Rating"] = pd.to_numeric(parsed_df["My Rating"], errors="coerce").astype(float)
     out["Exclusive Shelf"] = "read"
     out["Read Count"] = 1
 
@@ -488,6 +488,8 @@ def enrich_catalog_dataframe(df: pd.DataFrame, progress_bar=None, status_text=No
 # ── Database Helpers ──────────────────────────────────────────────────────────
 def df_to_sqlite(df: pd.DataFrame, db_name=DB_NAME, table_name=TABLE_NAME):
     """Store a DataFrame in SQLite table, replacing existing records."""
+    if "My Rating" in df.columns:
+        df["My Rating"] = pd.to_numeric(df["My Rating"], errors="coerce").astype(float)
     conn = sqlite3.connect(db_name)
     df.to_sql(table_name, conn, if_exists="replace", index=False)
     conn.close()
@@ -505,6 +507,8 @@ def load_table(db_name=DB_NAME, table_name=TABLE_NAME):
     conn = sqlite3.connect(db_name)
     df = pd.read_sql_query(f"SELECT * FROM {table_name}", conn)
     conn.close()
+    if "My Rating" in df.columns:
+        df["My Rating"] = pd.to_numeric(df["My Rating"], errors="coerce").astype(float)
     return df
 
 
@@ -533,6 +537,8 @@ def table_has_data(db_name=DB_NAME, table_name=TABLE_NAME) -> bool:
 
 def save_table(df, db_name=DB_NAME, table_name=TABLE_NAME):
     """Write an edited DataFrame back to SQLite."""
+    if "My Rating" in df.columns:
+        df["My Rating"] = pd.to_numeric(df["My Rating"], errors="coerce").astype(float)
     conn = sqlite3.connect(db_name)
     df.to_sql(table_name, conn, if_exists="replace", index=False)
     conn.close()
@@ -1838,6 +1844,16 @@ try:
         column_config["cover_url"] = st.column_config.ImageColumn("Cover", help="Book cover image from Open Library")
     if "Average Rating" in df.columns:
         column_config["Average Rating"] = st.column_config.NumberColumn("Community Rating", format="%.2f")
+    if "My Rating" in df.columns:
+        df["My Rating"] = pd.to_numeric(df["My Rating"], errors="coerce").astype(float)
+        column_config["My Rating"] = st.column_config.NumberColumn(
+            "My Rating",
+            help="Your rating from 0.0 to 5.0 (decimals allowed, e.g. 4.5)",
+            min_value=0.0,
+            max_value=5.0,
+            step=0.1,
+            format="%.1f",
+        )
     if "genres" in df.columns:
         column_config["genres"] = st.column_config.TextColumn("Genres / Subjects")
 
