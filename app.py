@@ -1416,11 +1416,20 @@ def fetch_scored_candidates(catalog_df: pd.DataFrame) -> (List[Dict[str, object]
             "score": score,
         })
 
-    best_score = max(c["score"] for c in scored_candidates) if scored_candidates else 1.0
-    for c in scored_candidates:
-        c["taste_match"] = round((c["score"] / best_score) * 100, 1)
-
     scored_candidates.sort(key=lambda x: x["score"], reverse=True)
+
+    top_pool = scored_candidates[:15]
+    if top_pool:
+        s_max = top_pool[0]["score"]
+        s_min = top_pool[-1]["score"]
+        spread = (s_max - s_min) if (s_max - s_min) > 0 else 1.0
+        for c in scored_candidates:
+            ratio = max(0.0, min(1.0, (c["score"] - s_min) / spread))
+            c["taste_match"] = round(75.0 + (ratio * (98.0 - 75.0)), 1)
+    else:
+        for c in scored_candidates:
+            c["taste_match"] = 85.0
+
     return scored_candidates, has_nonfiction_anchor
 
 
@@ -1545,7 +1554,7 @@ def render_recommendations_section(catalog_df: pd.DataFrame):
         return
 
     refresh_count = st.session_state.get("refresh_count", 0)
-    col_btn, col_info = st.columns([1, 2])
+    col_btn, _ = st.columns([1, 2])
     with col_btn:
         if refresh_count < 1:
             if st.button("🔄 Refresh Recommendations", type="secondary", key="btn_refresh_recs"):
@@ -1569,13 +1578,6 @@ def render_recommendations_section(catalog_df: pd.DataFrame):
         else:
             st.button("🔄 Refresh Limit Reached (1/1 used)", type="secondary", disabled=True, key="btn_refresh_recs_disabled")
 
-    with col_info:
-        badge_text = "Showing initial picks 1–5" if refresh_count == 0 else "Showing refreshed picks 6–10 (Final batch)"
-        st.caption(f"ℹ️ {badge_text}")
-
-    badge_bg = "#2563EB" if refresh_count == 0 else "#7C3AED"
-    badge_label = "MATCH" if refresh_count == 0 else "MATCH (REFRESHED)"
-
     cards_html = """<div style="display: flex; flex-wrap: wrap; gap: 18px; margin-top: 15px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">"""
     for b in picks:
         cover_img = (
@@ -1590,8 +1592,8 @@ def render_recommendations_section(catalog_df: pd.DataFrame):
             <div style="display: flex; gap: 12px;">
                 {cover_img}
                 <div style="flex: 1;">
-                    <div style="background: {badge_bg}; color: #ffffff; font-size: 10px; font-weight: 700; padding: 3px 8px; border-radius: 999px; display: inline-block; margin-bottom: 6px;">
-                        {b['taste_match']}% {badge_label}
+                    <div style="background: #2563EB; color: #ffffff; font-size: 10px; font-weight: 700; padding: 3px 8px; border-radius: 999px; display: inline-block; margin-bottom: 6px;">
+                        {b['taste_match']}% MATCH
                     </div>
                     <div style="font-size: 14px; font-weight: 700; line-height: 1.25; margin-bottom: 4px; color: #ffffff;">{html.escape(b['title'])}</div>
                     <div style="font-size: 12px; opacity: 0.8; color: #e2e8f0;">by {html.escape(b['author'])}</div>
@@ -1784,7 +1786,6 @@ if not is_enriched:
     st.divider()
     st.subheader("Step 2: Enrich with Open Library")
     st.info(
-        "**Enrichment is required to proceed.** "
         "Click the button below to match your books against Open Library and fetch genres, page counts, community ratings, and cover images needed for your Wrapped stats."
     )
     if st.button("Proceed", type="primary", key="btn_enrich_mandatory"):
