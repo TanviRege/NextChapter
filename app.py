@@ -1486,7 +1486,7 @@ def render_recommendations_section(catalog_df: pd.DataFrame):
                 So, what's your NextChapter? 🎯
             </h2>
             <p style="font-size: 1rem; opacity: 0.8; margin-top: 6px;">
-                Hand-picked book recommendations matching your taste profile, sweet spot, and favorite genres.
+                Hand-picked book recommendations matching your taste profile.
             </p>
         </div>
         """,
