@@ -852,7 +852,7 @@ def generate_wrapped_poster_image(stats: Dict[str, object], archetype: str, arch
     # Header Card
     draw.rounded_rectangle([(40, 28), (w - 40, 138)], radius=16, fill=(24, 24, 32), outline=(45, 45, 55), width=1)
     draw.text((60, 46), "ANNUAL READING RECAP", font=f_badge, fill=(59, 130, 246))
-    draw.text((60, 68), "NextChapter Wrapped", font=f_title, fill=(255, 255, 255))
+    draw.text((60, 68), "Your Reading Wrapped", font=f_title, fill=(255, 255, 255))
     draw.text((60, 108), "Your Year in Books - Personalized Reading Stats", font=f_sub, fill=(180, 180, 190))
 
     def draw_panel(x1, y1, x2, y2, bg_color, badge, stat, subtitle, note):
@@ -960,7 +960,7 @@ def render_wrapped_section(stats: Dict[str, object]):
                 ANNUAL RECAP
             </div>
             <h2 style="font-size: 2.3rem; font-weight: 800; margin: 0; color: inherit;">
-                NextChapter Wrapped: Your Year in Books ✨
+                Your Reading Wrapped!
             </h2>
             <p style="font-size: 1.05rem; opacity: 0.8; margin-top: 6px;">
                 Your literary journey, parsed into your signature reading stats.
@@ -1236,9 +1236,9 @@ def calculate_length_fit(pages: Optional[float], p25: float = 300.0, p75: float 
     return max(0.0, 1.0 - (pages - p75) / 400.0)
 
 
-def generate_recommendations(catalog_df: pd.DataFrame) -> List[Dict[str, object]]:
+def fetch_scored_candidates(catalog_df: pd.DataFrame) -> (List[Dict[str, object]], bool):
     if catalog_df.empty:
-        return []
+        return [], False
 
     anchor_books = catalog_df[catalog_df["My Rating"] >= 4.0].copy()
     if anchor_books.empty:
@@ -1368,7 +1368,7 @@ def generate_recommendations(catalog_df: pd.DataFrame) -> List[Dict[str, object]
             pass
 
     if not candidates:
-        return []
+        return [], has_nonfiction_anchor
 
     raw_subject_scores = []
     for doc in candidates:
@@ -1421,32 +1421,50 @@ def generate_recommendations(catalog_df: pd.DataFrame) -> List[Dict[str, object]
         c["taste_match"] = round((c["score"] / best_score) * 100, 1)
 
     scored_candidates.sort(key=lambda x: x["score"], reverse=True)
+    return scored_candidates, has_nonfiction_anchor
+
+
+def select_diverse_recommendations(
+    scored_pool: List[Dict[str, object]],
+    exclude_titles: Optional[set] = None,
+    max_picks: int = 5,
+    reserve_nonfiction: bool = False,
+) -> List[Dict[str, object]]:
+    if not scored_pool:
+        return []
+    if exclude_titles is None:
+        exclude_titles = set()
 
     def get_primary_subject(cand):
         tags = [str(s).lower() for s in cand.get("subjects", [])]
         specific = [t for t in tags if t not in ("fiction", "general", "fiction / general", "nonfiction")]
         return specific[0] if specific else (tags[0] if tags else "general")
 
-    final_picks = []
+    picks = []
     subject_counts = {}
     author_counts = {}
 
-    if has_nonfiction_anchor:
-        for cand in scored_candidates:
+    if reserve_nonfiction:
+        for cand in scored_pool:
             if cand.get("is_nonfiction", False):
+                c_title = clean_book_title(cand["title"])
+                if c_title in exclude_titles:
+                    continue
                 cand_copy = dict(cand)
                 cand_copy["pick_reason"] = "Curated Nonfiction Anchor Pick"
-                final_picks.append(cand_copy)
+                picks.append(cand_copy)
                 top_s = get_primary_subject(cand)
                 auth = cand["author"].lower()
                 subject_counts[top_s] = 1
                 author_counts[auth] = 1
                 break
 
-    for cand in scored_candidates:
-        if len(final_picks) >= 5:
+    for cand in scored_pool:
+        if len(picks) >= max_picks:
             break
-        if any(clean_book_title(p["title"]) == clean_book_title(cand["title"]) for p in final_picks):
+
+        c_title = clean_book_title(cand["title"])
+        if c_title in exclude_titles or any(clean_book_title(p["title"]) == c_title for p in picks):
             continue
 
         top_s = get_primary_subject(cand)
@@ -1456,23 +1474,28 @@ def generate_recommendations(catalog_df: pd.DataFrame) -> List[Dict[str, object]
             continue
 
         reasons = []
-        if cand["author_bonus"] == 1.0:
+        if cand.get("author_bonus", 0.0) == 1.0:
             reasons.append(f"Loved author ({cand['author']})")
-        if cand["length_fit"] == 1.0 and cand["pages"]:
+        if cand.get("length_fit", 0.0) == 1.0 and cand.get("pages"):
             reasons.append(f"In sweet spot ({int(cand['pages'])} pages)")
-        if cand["subject_fit"] >= 0.7:
+        if cand.get("subject_fit", 0.0) >= 0.7:
             reasons.append(f"High genre match ({top_s.title()})")
         if not reasons:
             reasons.append("High taste & community match")
 
         cand_copy = dict(cand)
         cand_copy["pick_reason"] = " • ".join(reasons)
-        final_picks.append(cand_copy)
+        picks.append(cand_copy)
 
         subject_counts[top_s] = subject_counts.get(top_s, 0) + 1
         author_counts[auth] = author_counts.get(auth, 0) + 1
 
-    return final_picks
+    return picks
+
+
+def clear_recommendations_state():
+    for k in ("recommendations", "seen_recommendation_titles", "refresh_count", "scored_candidates", "has_nonfiction_anchor"):
+        st.session_state.pop(k, None)
 
 
 def render_recommendations_section(catalog_df: pd.DataFrame):
@@ -1498,7 +1521,18 @@ def render_recommendations_section(catalog_df: pd.DataFrame):
         with col_c:
             if st.button("Discover Your NextChapter 🎯", type="primary", key="btn_fetch_recs"):
                 with st.spinner("Analyzing your reading profile and sourcing recommendations..."):
-                    st.session_state["recommendations"] = generate_recommendations(catalog_df)
+                    scored_pool, has_nonfic = fetch_scored_candidates(catalog_df)
+                    st.session_state["scored_candidates"] = scored_pool
+                    st.session_state["has_nonfiction_anchor"] = has_nonfic
+                    picks = select_diverse_recommendations(
+                        scored_pool,
+                        exclude_titles=set(),
+                        max_picks=5,
+                        reserve_nonfiction=has_nonfic,
+                    )
+                    st.session_state["recommendations"] = picks
+                    st.session_state["seen_recommendation_titles"] = {clean_book_title(p["title"]) for p in picks}
+                    st.session_state["refresh_count"] = 0
                     st.rerun()
         return
 
@@ -1506,16 +1540,41 @@ def render_recommendations_section(catalog_df: pd.DataFrame):
     if not picks:
         st.info("No recommendations found yet. Click below to fetch.")
         if st.button("🔄 Try Again", type="secondary", key="btn_retry_recs"):
-            st.session_state.pop("recommendations", None)
+            clear_recommendations_state()
             st.rerun()
         return
 
-    col_btn, _ = st.columns([1, 3])
+    refresh_count = st.session_state.get("refresh_count", 0)
+    col_btn, col_info = st.columns([1, 2])
     with col_btn:
-        if st.button("🔄 Refresh Recommendations", type="secondary", key="btn_refresh_recs"):
-            with st.spinner("Finding fresh recommendations..."):
-                st.session_state["recommendations"] = generate_recommendations(catalog_df)
-                st.rerun()
+        if refresh_count < 1:
+            if st.button("🔄 Refresh Recommendations", type="secondary", key="btn_refresh_recs"):
+                scored_pool = st.session_state.get("scored_candidates", [])
+                if not scored_pool:
+                    scored_pool, has_nonfic = fetch_scored_candidates(catalog_df)
+                    st.session_state["scored_candidates"] = scored_pool
+                    st.session_state["has_nonfiction_anchor"] = has_nonfic
+                seen = st.session_state.get("seen_recommendation_titles", set())
+                next_picks = select_diverse_recommendations(
+                    scored_pool,
+                    exclude_titles=seen,
+                    max_picks=5,
+                    reserve_nonfiction=False,
+                )
+                if next_picks:
+                    st.session_state["recommendations"] = next_picks
+                    st.session_state["seen_recommendation_titles"] = seen.union({clean_book_title(p["title"]) for p in next_picks})
+                    st.session_state["refresh_count"] = 1
+                    st.rerun()
+        else:
+            st.button("🔄 Refresh Limit Reached (1/1 used)", type="secondary", disabled=True, key="btn_refresh_recs_disabled")
+
+    with col_info:
+        badge_text = "Showing initial picks 1–5" if refresh_count == 0 else "Showing refreshed picks 6–10 (Final batch)"
+        st.caption(f"ℹ️ {badge_text}")
+
+    badge_bg = "#2563EB" if refresh_count == 0 else "#7C3AED"
+    badge_label = "MATCH" if refresh_count == 0 else "MATCH (REFRESHED)"
 
     cards_html = """<div style="display: flex; flex-wrap: wrap; gap: 18px; margin-top: 15px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">"""
     for b in picks:
@@ -1531,8 +1590,8 @@ def render_recommendations_section(catalog_df: pd.DataFrame):
             <div style="display: flex; gap: 12px;">
                 {cover_img}
                 <div style="flex: 1;">
-                    <div style="background: #2563EB; color: #ffffff; font-size: 10px; font-weight: 700; padding: 3px 8px; border-radius: 999px; display: inline-block; margin-bottom: 6px;">
-                        {b['taste_match']}% MATCH
+                    <div style="background: {badge_bg}; color: #ffffff; font-size: 10px; font-weight: 700; padding: 3px 8px; border-radius: 999px; display: inline-block; margin-bottom: 6px;">
+                        {b['taste_match']}% {badge_label}
                     </div>
                     <div style="font-size: 14px; font-weight: 700; line-height: 1.25; margin-bottom: 4px; color: #ffffff;">{html.escape(b['title'])}</div>
                     <div style="font-size: 12px; opacity: 0.8; color: #e2e8f0;">by {html.escape(b['author'])}</div>
@@ -1666,7 +1725,7 @@ with tab_upload:
                 df_imported = csv_to_sqlite(tmp_path)
                 st.session_state["show_wrapped"] = False
                 st.session_state["is_enriched"] = False
-                st.session_state.pop("recommendations", None)
+                clear_recommendations_state()
                 st.success(
                     f"✅ Imported **{len(df_imported)} rows × {len(df_imported.columns)} columns** "
                     f"into `{TABLE_NAME}`"
@@ -1697,7 +1756,7 @@ with tab_paste:
                     df_to_sqlite(df_goodreads)
                     st.session_state["show_wrapped"] = False
                     st.session_state["is_enriched"] = False
-                    st.session_state.pop("recommendations", None)
+                    clear_recommendations_state()
                     st.success(
                         f"✅ Parsed and imported **{len(df_goodreads)} books** into `{TABLE_NAME}`!"
                     )
@@ -1793,7 +1852,7 @@ try:
         if st.button("💾 Save changes", type="secondary"):
             save_table(edited_df)
             st.session_state["show_wrapped"] = False
-            st.session_state.pop("recommendations", None)
+            clear_recommendations_state()
             st.success("Changes saved to database.")
 
     with btn_col2:
