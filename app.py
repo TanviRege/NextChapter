@@ -1210,7 +1210,343 @@ def render_wrapped_section(stats: Dict[str, object]):
         )
 
 
+def is_children_book(subjects: list) -> bool:
+    if not subjects:
+        return False
+    juvenile_terms = (
+        "juvenile", "children's", "child and youth",
+        "middle grade", "picture book", "elementary school", "early reader"
+    )
+    return any(any(term in str(s).lower() for term in juvenile_terms) for s in subjects)
 
+
+def clean_book_title(title: str) -> str:
+    if not title:
+        return ""
+    return re.split(r" - | \(|: ", title)[0].strip().lower()
+
+
+def calculate_length_fit(pages: Optional[float], p25: float = 300.0, p75: float = 500.0) -> float:
+    if not pages or pd.isna(pages) or pages <= 0:
+        return 0.5
+    if p25 <= pages <= p75:
+        return 1.0
+    if pages < p25:
+        return max(0.0, 1.0 - (p25 - pages) / 200.0)
+    return max(0.0, 1.0 - (pages - p75) / 400.0)
+
+
+def generate_recommendations(catalog_df: pd.DataFrame) -> List[Dict[str, object]]:
+    if catalog_df.empty:
+        return []
+
+    anchor_books = catalog_df[catalog_df["My Rating"] >= 4.0].copy()
+    if anchor_books.empty:
+        anchor_books = catalog_df[catalog_df["My Rating"] > 0].copy()
+    if anchor_books.empty:
+        anchor_books = catalog_df.copy()
+
+    affinity_authors = set(anchor_books["Author"].dropna().str.strip().str.lower())
+
+    subject_scores = {}
+    for _, row in catalog_df.iterrows():
+        rating = row.get("My Rating") or 0
+        weight = 2.5 if rating >= 4.5 else (1.5 if rating >= 3.5 else (0.2 if rating >= 2.5 else -1.5))
+        genres_text = str(row.get("genres") or "")
+        tags = [t.strip().lower() for t in genres_text.split(",") if t.strip()]
+        for tag in tags:
+            subject_scores[tag] = subject_scores.get(tag, 0.0) + weight
+
+    top_subjects = sorted(subject_scores.items(), key=lambda x: x[1], reverse=True)
+
+    nonfiction_keywords = {
+        "nonfiction", "history", "biography", "memoir", "philosophy",
+        "psychology", "science", "politics", "religion", "christianity"
+    }
+    has_nonfiction_anchor = any(
+        any(k in str(r.get("genres") or "").lower() for k in nonfiction_keywords)
+        for _, r in anchor_books.iterrows()
+    )
+
+    children_keywords = (
+        "juvenile", "children's", "child and youth",
+        "middle grade", "picture book", "elementary", "fairy tale"
+    )
+    reads_children = any(
+        any(k in str(r.get("genres") or "").lower() for k in children_keywords)
+        for _, r in anchor_books.iterrows()
+    )
+
+    anchor_pages = anchor_books["Number of Pages"].dropna()
+    valid_pages = anchor_pages[(anchor_pages >= 50) & (anchor_pages <= 2000)]
+    if len(valid_pages) >= 4:
+        p25 = float(valid_pages.quantile(0.25))
+        p75 = float(valid_pages.quantile(0.75))
+    else:
+        p25, p75 = 300.0, 500.0
+
+    read_titles = set(clean_book_title(t) for t in catalog_df["Title"].dropna())
+    candidates = []
+    seen_titles = set(read_titles)
+    headers = {"User-Agent": "NextChapterBookApp/1.0 (educational research)"}
+
+    generic_tags = {"fiction", "general", "fiction / general", "nonfiction"}
+    active_subjects = [s for s, _ in top_subjects if s.lower() not in generic_tags][:3]
+    if not active_subjects:
+        active_subjects = [s for s, _ in top_subjects][:2]
+
+    for subj in active_subjects:
+        url = "https://openlibrary.org/search.json"
+        params = {
+            "q": f'subject:"{subj}" language:eng',
+            "sort": "readinglog",
+            "limit": 15,
+            "fields": "key,title,author_name,number_of_pages_median,ratings_average,ratings_count,subject,cover_i",
+        }
+        try:
+            resp = requests.get(url, params=params, headers=headers, timeout=8)
+            if resp.status_code == 200:
+                for doc in resp.json().get("docs", []):
+                    t = doc.get("title")
+                    c_title = clean_book_title(t)
+                    if not c_title or c_title in seen_titles:
+                        continue
+                    if not reads_children and is_children_book(doc.get("subject", [])):
+                        continue
+                    seen_titles.add(c_title)
+                    doc["is_nonfiction"] = False
+                    candidates.append(doc)
+        except Exception:
+            pass
+
+    for auth in list(affinity_authors)[:2]:
+        url = "https://openlibrary.org/search.json"
+        params = {
+            "author": auth,
+            "sort": "readinglog",
+            "limit": 6,
+            "fields": "key,title,author_name,number_of_pages_median,ratings_average,ratings_count,subject,cover_i",
+        }
+        try:
+            resp = requests.get(url, params=params, headers=headers, timeout=8)
+            if resp.status_code == 200:
+                for doc in resp.json().get("docs", []):
+                    t = doc.get("title")
+                    c_title = clean_book_title(t)
+                    if not c_title or c_title in seen_titles:
+                        continue
+                    if not reads_children and is_children_book(doc.get("subject", [])):
+                        continue
+                    seen_titles.add(c_title)
+                    doc["is_nonfiction"] = False
+                    candidates.append(doc)
+        except Exception:
+            pass
+
+    if has_nonfiction_anchor:
+        url = "https://openlibrary.org/search.json"
+        params = {
+            "q": "subject:memoir OR subject:history language:eng",
+            "sort": "readinglog",
+            "limit": 10,
+            "fields": "key,title,author_name,number_of_pages_median,ratings_average,ratings_count,subject,cover_i",
+        }
+        try:
+            resp = requests.get(url, params=params, headers=headers, timeout=8)
+            if resp.status_code == 200:
+                for doc in resp.json().get("docs", []):
+                    t = doc.get("title")
+                    c_title = clean_book_title(t)
+                    if not c_title or c_title in seen_titles:
+                        continue
+                    if not reads_children and is_children_book(doc.get("subject", [])):
+                        continue
+                    seen_titles.add(c_title)
+                    doc["is_nonfiction"] = True
+                    candidates.append(doc)
+        except Exception:
+            pass
+
+    if not candidates:
+        return []
+
+    raw_subject_scores = []
+    for doc in candidates:
+        tags = [str(s).lower() for s in doc.get("subject", [])]
+        raw = sum(subject_scores.get(t, 0.0) for t in tags)
+        raw_subject_scores.append(raw)
+
+    min_raw = min(raw_subject_scores) if raw_subject_scores else 0.0
+    max_raw = max(raw_subject_scores) if raw_subject_scores else 1.0
+    raw_spread = (max_raw - min_raw) if (max_raw - min_raw) > 0 else 1.0
+
+    scored_candidates = []
+    for i, doc in enumerate(candidates):
+        title = doc.get("title", "Unknown Title")
+        authors = doc.get("author_name", ["Unknown Author"])
+        author = authors[0] if authors else "Unknown Author"
+        pages = doc.get("number_of_pages_median")
+        ratings_avg = doc.get("ratings_average") or 0.0
+        ratings_cnt = doc.get("ratings_count") or 0
+        subjects = doc.get("subject", [])
+        cover_i = doc.get("cover_i")
+        cover_url = f"https://covers.openlibrary.org/b/id/{cover_i}-M.jpg" if cover_i else None
+        is_nonfiction = doc.get("is_nonfiction", False)
+
+        subject_fit = max(0.0, min(1.0, (raw_subject_scores[i] - min_raw) / raw_spread))
+        author_bonus = 1.0 if any(a.lower() in affinity_authors for a in authors) else 0.0
+        community = min(1.0, float(ratings_avg) / 5.0) if ratings_cnt >= 100 else 0.0
+        length_fit = calculate_length_fit(pages, p25, p75)
+
+        score = (0.55 * subject_fit) + (0.20 * author_bonus) + (0.15 * community) + (0.10 * length_fit)
+
+        scored_candidates.append({
+            "title": title,
+            "author": author,
+            "pages": pages,
+            "ratings_avg": round(ratings_avg, 2),
+            "ratings_cnt": ratings_cnt,
+            "subjects": subjects,
+            "cover_url": cover_url,
+            "is_nonfiction": is_nonfiction,
+            "subject_fit": subject_fit,
+            "author_bonus": author_bonus,
+            "community": community,
+            "length_fit": length_fit,
+            "score": score,
+        })
+
+    best_score = max(c["score"] for c in scored_candidates) if scored_candidates else 1.0
+    for c in scored_candidates:
+        c["taste_match"] = round((c["score"] / best_score) * 100, 1)
+
+    scored_candidates.sort(key=lambda x: x["score"], reverse=True)
+
+    def get_primary_subject(cand):
+        tags = [str(s).lower() for s in cand.get("subjects", [])]
+        specific = [t for t in tags if t not in ("fiction", "general", "fiction / general", "nonfiction")]
+        return specific[0] if specific else (tags[0] if tags else "general")
+
+    final_picks = []
+    subject_counts = {}
+    author_counts = {}
+
+    if has_nonfiction_anchor:
+        for cand in scored_candidates:
+            if cand.get("is_nonfiction", False):
+                cand_copy = dict(cand)
+                cand_copy["pick_reason"] = "Curated Nonfiction Anchor Pick"
+                final_picks.append(cand_copy)
+                top_s = get_primary_subject(cand)
+                auth = cand["author"].lower()
+                subject_counts[top_s] = 1
+                author_counts[auth] = 1
+                break
+
+    for cand in scored_candidates:
+        if len(final_picks) >= 5:
+            break
+        if any(clean_book_title(p["title"]) == clean_book_title(cand["title"]) for p in final_picks):
+            continue
+
+        top_s = get_primary_subject(cand)
+        auth = cand["author"].lower()
+
+        if subject_counts.get(top_s, 0) >= 2 or author_counts.get(auth, 0) >= 2:
+            continue
+
+        reasons = []
+        if cand["author_bonus"] == 1.0:
+            reasons.append(f"Loved author ({cand['author']})")
+        if cand["length_fit"] == 1.0 and cand["pages"]:
+            reasons.append(f"In sweet spot ({int(cand['pages'])} pages)")
+        if cand["subject_fit"] >= 0.7:
+            reasons.append(f"High genre match ({top_s.title()})")
+        if not reasons:
+            reasons.append("High taste & community match")
+
+        cand_copy = dict(cand)
+        cand_copy["pick_reason"] = " • ".join(reasons)
+        final_picks.append(cand_copy)
+
+        subject_counts[top_s] = subject_counts.get(top_s, 0) + 1
+        author_counts[auth] = author_counts.get(auth, 0) + 1
+
+    return final_picks
+
+
+def render_recommendations_section(catalog_df: pd.DataFrame):
+    st.markdown(
+        """
+        <div style="text-align: center; margin: 40px 0 20px 0;">
+            <div style="display: inline-block; padding: 6px 18px; background: #2563EB; color: #ffffff; font-size: 13px; font-weight: 800; border-radius: 999px; letter-spacing: 1.5px; margin-bottom: 8px;">
+                RECOMMENDATIONS
+            </div>
+            <h2 style="font-size: 2.1rem; font-weight: 800; margin: 0; color: inherit;">
+                So, what's your NextChapter? 🎯
+            </h2>
+            <p style="font-size: 1rem; opacity: 0.8; margin-top: 6px;">
+                Hand-picked book recommendations matching your taste profile, sweet spot, and favorite genres.
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    if "recommendations" not in st.session_state:
+        col_c, _ = st.columns([1, 1])
+        with col_c:
+            if st.button("Discover Your NextChapter 🎯", type="primary", key="btn_fetch_recs"):
+                with st.spinner("Analyzing your reading profile and sourcing recommendations..."):
+                    st.session_state["recommendations"] = generate_recommendations(catalog_df)
+                    st.rerun()
+        return
+
+    picks = st.session_state.get("recommendations", [])
+    if not picks:
+        st.info("No recommendations found yet. Click below to fetch.")
+        if st.button("🔄 Try Again", type="secondary", key="btn_retry_recs"):
+            st.session_state.pop("recommendations", None)
+            st.rerun()
+        return
+
+    col_btn, _ = st.columns([1, 3])
+    with col_btn:
+        if st.button("🔄 Refresh Recommendations", type="secondary", key="btn_refresh_recs"):
+            with st.spinner("Finding fresh recommendations..."):
+                st.session_state["recommendations"] = generate_recommendations(catalog_df)
+                st.rerun()
+
+    cards_html = """<div style="display: flex; flex-wrap: wrap; gap: 18px; margin-top: 15px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">"""
+    for b in picks:
+        cover_img = (
+            f'<img src="{b["cover_url"]}" style="width: 95px; height: 145px; object-fit: cover; border-radius: 6px; box-shadow: 0 4px 10px rgba(0,0,0,0.25);" />'
+            if b.get("cover_url")
+            else '<div style="width: 95px; height: 145px; background: #2a2a32; color: #aaa; display: flex; align-items: center; justify-content: center; border-radius: 6px; font-size: 11px; text-align: center;">No Cover</div>'
+        )
+        comm_text = f"★ {b['ratings_avg']}" if b.get("ratings_avg") else "Pending"
+        pages_text = f"📖 {int(b['pages'])} pages" if b.get("pages") else "📖 N/A"
+        cards_html += f"""
+        <div style="background: #181820; color: #ffffff; border: 1px solid #2e2e38; border-radius: 14px; padding: 16px; width: 280px; box-shadow: 0 6px 16px rgba(0,0,0,0.2); display: flex; flex-direction: column; justify-content: space-between;">
+            <div style="display: flex; gap: 12px;">
+                {cover_img}
+                <div style="flex: 1;">
+                    <div style="background: #2563EB; color: #ffffff; font-size: 10px; font-weight: 700; padding: 3px 8px; border-radius: 999px; display: inline-block; margin-bottom: 6px;">
+                        {b['taste_match']}% MATCH
+                    </div>
+                    <div style="font-size: 14px; font-weight: 700; line-height: 1.25; margin-bottom: 4px; color: #ffffff;">{html.escape(b['title'])}</div>
+                    <div style="font-size: 12px; opacity: 0.8; color: #e2e8f0;">by {html.escape(b['author'])}</div>
+                    <div style="font-size: 11px; opacity: 0.7; margin-top: 6px; color: #cbd5e1;">{pages_text}</div>
+                    <div style="font-size: 11px; color: #fbbf24; margin-top: 2px;">{comm_text}</div>
+                </div>
+            </div>
+            <div style="margin-top: 12px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.1); font-size: 11px; opacity: 0.85; font-style: italic; color: #93c5fd;">
+                💡 {html.escape(b['pick_reason'])}
+            </div>
+        </div>
+        """
+    cards_html += "</div>"
+    render_safe_html(cards_html)
 
 
 # ── Page config ──────────────────────────────────────────────────────────────
@@ -1330,6 +1666,7 @@ with tab_upload:
                 df_imported = csv_to_sqlite(tmp_path)
                 st.session_state["show_wrapped"] = False
                 st.session_state["is_enriched"] = False
+                st.session_state.pop("recommendations", None)
                 st.success(
                     f"✅ Imported **{len(df_imported)} rows × {len(df_imported.columns)} columns** "
                     f"into `{TABLE_NAME}`"
@@ -1360,6 +1697,7 @@ with tab_paste:
                     df_to_sqlite(df_goodreads)
                     st.session_state["show_wrapped"] = False
                     st.session_state["is_enriched"] = False
+                    st.session_state.pop("recommendations", None)
                     st.success(
                         f"✅ Parsed and imported **{len(df_goodreads)} books** into `{TABLE_NAME}`!"
                     )
@@ -1455,6 +1793,7 @@ try:
         if st.button("💾 Save changes", type="secondary"):
             save_table(edited_df)
             st.session_state["show_wrapped"] = False
+            st.session_state.pop("recommendations", None)
             st.success("Changes saved to database.")
 
     with btn_col2:
@@ -1474,6 +1813,8 @@ try:
         try:
             stats = fetch_wrapped_stats()
             render_wrapped_section(stats)
+            st.divider()
+            render_recommendations_section(df)
         except Exception as err:
             st.error(f"Could not generate Wrapped stats: {err}")
 
