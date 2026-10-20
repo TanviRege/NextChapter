@@ -3,6 +3,7 @@ import pandas as pd
 import sqlite3
 import os
 import re
+import unicodedata
 import requests
 import html
 import io
@@ -1227,9 +1228,13 @@ def is_children_book(subjects: list) -> bool:
 
 
 def clean_book_title(title: str) -> str:
-    if not title:
+    if not title or not isinstance(title, str):
         return ""
-    return re.split(r" - | \(|: ", title)[0].strip().lower()
+    base = re.split(r" - | \(|: | by ", title, flags=re.IGNORECASE)[0].strip()
+    nfkd = unicodedata.normalize("NFKD", base)
+    no_accents = "".join(c for c in nfkd if not unicodedata.combining(c))
+    clean = re.sub(r"[^\w\s]", "", no_accents).lower()
+    return re.sub(r"\s+", " ", clean).strip()
 
 
 def calculate_length_fit(pages: Optional[float], p25: float = 300.0, p75: float = 500.0) -> float:
