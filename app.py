@@ -425,7 +425,7 @@ def enrich_catalog_dataframe(df: pd.DataFrame, progress_bar=None, status_text=No
     enriched_df = df.copy()
 
     # Ensure required enrichment columns exist
-    for col in ["ol_key", "Average Rating", "Number of Pages", "Original Publication Year", "cover_url", "genres"]:
+    for col in ["ol_key", "Average Rating", "Number of Pages", "Original Publication Year", "Year Published", "cover_url", "genres"]:
         if col not in enriched_df.columns:
             enriched_df[col] = None
 
@@ -477,8 +477,11 @@ def enrich_catalog_dataframe(df: pd.DataFrame, progress_bar=None, status_text=No
             if is_blank(row.get("Number of Pages")) and data.get("Number of Pages") is not None:
                 enriched_df.at[idx, "Number of Pages"] = data["Number of Pages"]
 
-            if is_blank(row.get("Original Publication Year")) and data.get("Original Publication Year") is not None:
-                enriched_df.at[idx, "Original Publication Year"] = data["Original Publication Year"]
+            if data.get("Original Publication Year") is not None:
+                if is_blank(row.get("Original Publication Year")):
+                    enriched_df.at[idx, "Original Publication Year"] = data["Original Publication Year"]
+                if is_blank(row.get("Year Published")):
+                    enriched_df.at[idx, "Year Published"] = data["Original Publication Year"]
 
             if is_blank(row.get("Average Rating")) and data.get("Average Rating") is not None:
                 enriched_df.at[idx, "Average Rating"] = data["Average Rating"]
@@ -1877,6 +1880,9 @@ try:
         if c not in df.columns:
             df[c] = None
 
+    if "Original Publication Year" in df.columns:
+        df["Year Published"] = df["Year Published"].fillna(df["Original Publication Year"])
+
     df_display = df[display_cols].copy()
     if "My Rating" in df_display.columns:
         df_display["My Rating"] = pd.to_numeric(df_display["My Rating"], errors="coerce").astype(float)
@@ -1956,6 +1962,8 @@ try:
         if len(original_df) == len(edited_subset):
             for col in display_cols:
                 original_df[col] = edited_subset[col]
+            if "Original Publication Year" in original_df.columns:
+                original_df["Original Publication Year"] = original_df["Year Published"]
             save_table(original_df)
             return original_df
         else:
