@@ -8,12 +8,56 @@ import requests
 import html
 import io
 import urllib.parse
+import uuid
 from PIL import Image, ImageDraw, ImageFont
 from typing import Dict, Optional, Union, List
 
 DB_NAME = "catalog.db"
 TABLE_NAME = "user_catalog"
+FEEDBACK_DB = "feedback.db"
 TEMPLATE_PATH = "goodreads-template.csv"
+
+
+def init_feedback_db(db_name=FEEDBACK_DB):
+    conn = sqlite3.connect(db_name)
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS recommendation_feedback (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT,
+            timestamp TEXT,
+            title TEXT,
+            author TEXT,
+            taste_match_pct REAL,
+            action TEXT,
+            ol_key TEXT
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+
+def log_recommendation_feedback(session_id: str, title: str, author: str, taste_match_pct: float, action: str, ol_key: str = None, db_name=FEEDBACK_DB):
+    init_feedback_db(db_name)
+    conn = sqlite3.connect(db_name)
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO recommendation_feedback (session_id, timestamp, title, author, taste_match_pct, action, ol_key)
+        VALUES (?, datetime('now'), ?, ?, ?, ?, ?)
+    """, (session_id, title, author, float(taste_match_pct or 0.0), action, ol_key))
+    conn.commit()
+    conn.close()
+
+
+def fetch_feedback_summary(db_name=FEEDBACK_DB) -> pd.DataFrame:
+    init_feedback_db(db_name)
+    try:
+        conn = sqlite3.connect(db_name)
+        df_feed = pd.read_sql_query("SELECT * FROM recommendation_feedback ORDER BY id DESC", conn)
+        conn.close()
+        return df_feed
+    except Exception:
+        return pd.DataFrame()
 
 GOODREADS_COLUMNS = [
     "Book Id", "Title", "Author", "Author l-f", "Additional Authors",
@@ -1517,7 +1561,7 @@ def select_diverse_recommendations(
 
 
 def clear_recommendations_state():
-    for k in ("recommendations", "seen_recommendation_titles", "refresh_count", "scored_candidates", "has_nonfiction_anchor"):
+    for k in ("recommendations", "seen_recommendation_titles", "refresh_count", "scored_candidates", "has_nonfiction_anchor", "interested_titles"):
         st.session_state.pop(k, None)
 
 
@@ -1567,8 +1611,13 @@ def render_recommendations_section(catalog_df: pd.DataFrame):
             st.rerun()
         return
 
+    if "interested_titles" not in st.session_state:
+        st.session_state["interested_titles"] = set()
+    interested_titles = st.session_state["interested_titles"]
+    session_id = st.session_state.get("session_id", "default")
+
     refresh_count = st.session_state.get("refresh_count", 0)
-    col_btn, _ = st.columns([1, 2])
+    col_btn, col_stats = st.columns([1, 2])
     with col_btn:
         if refresh_count < 1:
             if st.button("🔄 Refresh Recommendations", type="secondary", key="btn_refresh_recs"):
@@ -1592,36 +1641,120 @@ def render_recommendations_section(catalog_df: pd.DataFrame):
         else:
             st.button("🔄 Refresh Limit Reached (1/1 used)", type="secondary", disabled=True, key="btn_refresh_recs_disabled")
 
-    cards_html = """<div style="display: flex; flex-wrap: wrap; gap: 18px; margin-top: 15px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">"""
-    for b in picks:
-        cover_img = (
-            f'<img src="{b["cover_url"]}" style="width: 95px; height: 145px; object-fit: cover; border-radius: 6px; box-shadow: 0 4px 10px rgba(0,0,0,0.25);" />'
-            if b.get("cover_url")
-            else '<div style="width: 95px; height: 145px; background: #2a2a32; color: #aaa; display: flex; align-items: center; justify-content: center; border-radius: 6px; font-size: 11px; text-align: center;">No Cover</div>'
-        )
-        comm_text = f"★ {b['ratings_avg']}" if b.get("ratings_avg") else "Pending"
-        pages_text = f"📖 {int(b['pages'])} pages" if b.get("pages") else "📖 N/A"
-        cards_html += f"""
-        <div style="background: #181820; color: #ffffff; border: 1px solid #2e2e38; border-radius: 14px; padding: 16px; width: 280px; box-shadow: 0 6px 16px rgba(0,0,0,0.2); display: flex; flex-direction: column; justify-content: space-between;">
-            <div style="display: flex; gap: 12px;">
-                {cover_img}
-                <div style="flex: 1;">
-                    <div style="background: #2563EB; color: #ffffff; font-size: 10px; font-weight: 700; padding: 3px 8px; border-radius: 999px; display: inline-block; margin-bottom: 6px;">
+    agree_count = len([b for b in picks if clean_book_title(b["title"]) in interested_titles])
+    agree_pct = round((agree_count / len(picks)) * 100) if picks else 0
+    with col_stats:
+        st.caption(f"🎯 **Session Agreement**: {agree_count}/{len(picks)} books marked Interested ({agree_pct}%)")
+
+    cols = st.columns(len(picks))
+    for idx, b in enumerate(picks):
+        c_title = clean_book_title(b["title"])
+        is_interested = c_title in interested_titles
+        ol_url = f"https://openlibrary.org{b['key']}" if b.get("key") else f"https://openlibrary.org/search?q={urllib.parse.quote(b['title'])}"
+
+        with cols[idx]:
+            with st.container(border=True):
+                if b.get("cover_url"):
+                    st.markdown(
+                        f"""<div style="text-align: center; margin-bottom: 8px;">
+                            <img src="{b['cover_url']}" style="width: 100%; height: 165px; object-fit: cover; border-radius: 8px; box-shadow: 0 4px 10px rgba(0,0,0,0.3);" />
+                        </div>""",
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    st.markdown(
+                        """<div style="height: 165px; background: #23232c; border-radius: 8px; display: flex; align-items: center; justify-content: center; color: #888; font-size: 11px; margin-bottom: 8px;">No Cover</div>""",
+                        unsafe_allow_html=True,
+                    )
+
+                st.markdown(
+                    f"""<div style="background: #2563EB; color: #ffffff; font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 999px; display: inline-block; margin-bottom: 6px;">
                         {b['taste_match']}% MATCH
-                    </div>
-                    <div style="font-size: 14px; font-weight: 700; line-height: 1.25; margin-bottom: 4px; color: #ffffff;">{html.escape(b['title'])}</div>
-                    <div style="font-size: 12px; opacity: 0.8; color: #e2e8f0;">by {html.escape(b['author'])}</div>
-                    <div style="font-size: 11px; opacity: 0.7; margin-top: 6px; color: #cbd5e1;">{pages_text}</div>
-                    <div style="font-size: 11px; color: #fbbf24; margin-top: 2px;">{comm_text}</div>
-                </div>
-            </div>
-            <div style="margin-top: 12px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.1); font-size: 11px; opacity: 0.85; font-style: italic; color: #93c5fd;">
-                💡 {html.escape(b['pick_reason'])}
-            </div>
-        </div>
-        """
-    cards_html += "</div>"
-    render_safe_html(cards_html)
+                    </div>""",
+                    unsafe_allow_html=True,
+                )
+
+                st.markdown(f"**{b['title']}**\n\n<small style='color: #cbd5e1;'>by {b['author']}</small>", unsafe_allow_html=True)
+
+                pages_t = f"📖 {int(b['pages'])}p" if b.get("pages") else "📖 N/A"
+                comm_t = f"★ {b['ratings_avg']}" if b.get("ratings_avg") else "★ N/A"
+                st.caption(f"{pages_t} • {comm_t}")
+
+                st.markdown(f"<div style='font-size: 11px; color: #93c5fd; font-style: italic; min-height: 40px; margin-bottom: 6px;'>💡 {b.get('pick_reason', '')}</div>", unsafe_allow_html=True)
+
+                st.markdown(f"<a href='{ol_url}' target='_blank' style='font-size: 11px; color: #60A5FA; text-decoration: none;'>📖 Open Library ↗</a>", unsafe_allow_html=True)
+
+                st.markdown("<div style='margin-top: 8px;'></div>", unsafe_allow_html=True)
+
+                if is_interested:
+                    st.button("✅ Saved!", key=f"btn_int_{idx}_{c_title[:10]}", disabled=True, use_container_width=True)
+                else:
+                    if st.button("⭐ Interested!", key=f"btn_int_{idx}_{c_title[:10]}", type="secondary", use_container_width=True):
+                        log_recommendation_feedback(
+                            session_id=session_id,
+                            title=b["title"],
+                            author=b["author"],
+                            taste_match_pct=b.get("taste_match", 0),
+                            action="interested",
+                            ol_key=b.get("key"),
+                        )
+                        st.session_state["interested_titles"].add(c_title)
+                        st.toast(f"Saved '{b['title']}' to your Interested list! ⭐")
+                        st.rerun()
+
+                if st.button("I've Read This!", key=f"btn_read_{idx}_{c_title[:10]}", type="secondary", use_container_width=True):
+                    log_recommendation_feedback(
+                        session_id=session_id,
+                        title=b["title"],
+                        author=b["author"],
+                        taste_match_pct=b.get("taste_match", 0),
+                        action="already_read",
+                        ol_key=b.get("key"),
+                    )
+                    seen = st.session_state.get("seen_recommendation_titles", set())
+                    seen.add(c_title)
+                    st.session_state["seen_recommendation_titles"] = seen
+
+                    scored_pool = st.session_state.get("scored_candidates", [])
+                    all_excluded = seen.union({clean_book_title(p["title"]) for p in st.session_state["recommendations"]})
+                    replacements = select_diverse_recommendations(
+                        scored_pool,
+                        exclude_titles=all_excluded,
+                        max_picks=1,
+                        reserve_nonfiction=False,
+                    )
+                    if replacements:
+                        new_pick = replacements[0]
+                        st.session_state["recommendations"][idx] = new_pick
+                        st.session_state["seen_recommendation_titles"].add(clean_book_title(new_pick["title"]))
+                        st.toast(f"Replaced with '{new_pick['title']}'! 📚")
+                    else:
+                        st.session_state["recommendations"].pop(idx)
+                        st.toast(f"Marked '{b['title']}' as read!")
+                    st.rerun()
+
+    st.markdown("<div style='margin-top: 25px;'></div>", unsafe_allow_html=True)
+    with st.expander("📊 Recommendation Engine Analytics & Historical Feedback", expanded=False):
+        df_feed = fetch_feedback_summary()
+        if df_feed.empty:
+            st.info("No recommendation feedback recorded yet.")
+        else:
+            tot_int = len(df_feed[df_feed["action"] == "interested"])
+            tot_read = len(df_feed[df_feed["action"] == "already_read"])
+            tot_sess = df_feed["session_id"].nunique()
+            overall_rate = round((tot_int / (tot_int + tot_read)) * 100, 1) if (tot_int + tot_read) > 0 else 0.0
+
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Total Visitors / Sessions", tot_sess)
+            m2.metric("Total 'Interested' (Agreement)", tot_int)
+            m3.metric("Total 'Already Read' (Replacements)", tot_read)
+            m4.metric("Engine Agreement Rate", f"{overall_rate}%")
+
+            st.dataframe(
+                df_feed[["timestamp", "session_id", "title", "author", "taste_match_pct", "action"]],
+                use_container_width=True,
+                hide_index=True,
+            )
 
 
 # ── Page config ──────────────────────────────────────────────────────────────
@@ -1718,6 +1851,10 @@ if "initialized" not in st.session_state:
     if os.path.exists(DB_NAME):
         os.remove(DB_NAME)
     st.session_state["initialized"] = True
+if "session_id" not in st.session_state:
+    st.session_state["session_id"] = str(uuid.uuid4())[:8]
+if "interested_titles" not in st.session_state:
+    st.session_state["interested_titles"] = set()
 st.title("NextChapter 📚")
 
 has_data = table_has_data()
