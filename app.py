@@ -1863,9 +1863,33 @@ st.subheader("Step 3: Review your table and edit if required")
 try:
     df = load_table()
 
+    display_cols = [
+        "cover_url",
+        "Title",
+        "Author",
+        "My Rating",
+        "Number of Pages",
+        "Year Published",
+        "genres",
+        "Average Rating",
+    ]
+    for c in display_cols:
+        if c not in df.columns:
+            df[c] = None
+
+    df_display = df[display_cols].copy()
+    if "My Rating" in df_display.columns:
+        df_display["My Rating"] = pd.to_numeric(df_display["My Rating"], errors="coerce").astype(float)
+    if "Number of Pages" in df_display.columns:
+        df_display["Number of Pages"] = pd.to_numeric(df_display["Number of Pages"], errors="coerce")
+    if "Year Published" in df_display.columns:
+        df_display["Year Published"] = pd.to_numeric(df_display["Year Published"], errors="coerce")
+    if "Average Rating" in df_display.columns:
+        df_display["Average Rating"] = pd.to_numeric(df_display["Average Rating"], errors="coerce")
+
     col1, col2, col3 = st.columns([1, 1, 2])
     col1.metric("Rows", len(df))
-    col2.metric("Columns", len(df.columns))
+    col2.metric("Columns", len(display_cols))
 
     with col3:
         if st.button("🔄 Re-enrich with Open Library", type="secondary", help="Re-fetch genres, page count, publication year, cover image, and average ratings from Open Library"):
@@ -1882,36 +1906,66 @@ try:
                 st.success(f"✅ Successfully matched and enriched {matches}/{len(df)} books with Open Library data!")
                 st.rerun()
 
-    # Column configuration for clean data editor presentation
-    column_config = {}
-    if "cover_url" in df.columns:
-        column_config["cover_url"] = st.column_config.ImageColumn("Cover", help="Book cover image from Open Library")
-    if "Average Rating" in df.columns:
-        column_config["Average Rating"] = st.column_config.NumberColumn("Community Rating", format="%.2f")
-    if "My Rating" in df.columns:
-        df["My Rating"] = pd.to_numeric(df["My Rating"], errors="coerce").astype(float)
-        column_config["My Rating"] = st.column_config.NumberColumn(
+    column_config = {
+        "cover_url": st.column_config.ImageColumn("Cover", help="Book cover from Open Library"),
+        "Title": st.column_config.TextColumn("Title", required=True),
+        "Author": st.column_config.TextColumn("Author"),
+        "My Rating": st.column_config.NumberColumn(
             "My Rating",
             help="Your rating from 0.0 to 5.0 (decimals allowed, e.g. 4.5)",
             min_value=0.0,
             max_value=5.0,
             step=0.1,
             format="%.1f",
-        )
-    if "genres" in df.columns:
-        column_config["genres"] = st.column_config.TextColumn("Genres / Subjects")
+        ),
+        "Number of Pages": st.column_config.NumberColumn(
+            "Pages",
+            help="Total page count",
+            min_value=1,
+            max_value=10000,
+            step=1,
+            format="%d",
+        ),
+        "Year Published": st.column_config.NumberColumn(
+            "Year",
+            help="Year published",
+            min_value=1000,
+            max_value=2050,
+            step=1,
+            format="%d",
+        ),
+        "genres": st.column_config.TextColumn("Genres / Subjects"),
+        "Average Rating": st.column_config.NumberColumn(
+            "Community Rating",
+            help="Open Library community rating (out of 5)",
+            min_value=0.0,
+            max_value=5.0,
+            step=0.1,
+            format="%.2f",
+        ),
+    }
 
     edited_df = st.data_editor(
-        df,
+        df_display,
         width="stretch",
         num_rows="dynamic",
         column_config=column_config,
     )
 
+    def persist_edits(original_df, edited_subset):
+        if len(original_df) == len(edited_subset):
+            for col in display_cols:
+                original_df[col] = edited_subset[col]
+            save_table(original_df)
+            return original_df
+        else:
+            save_table(edited_subset)
+            return edited_subset
+
     btn_col1, btn_col2 = st.columns([1, 2])
     with btn_col1:
         if st.button("💾 Save changes", type="secondary"):
-            save_table(edited_df)
+            df = persist_edits(df, edited_df)
             st.session_state["show_wrapped"] = False
             clear_recommendations_state()
             st.success("Changes saved to database.")
@@ -1922,7 +1976,7 @@ try:
             type="primary",
             help="Save your table and generate your Reading Wrapped!",
         ):
-            save_table(edited_df)
+            df = persist_edits(df, edited_df)
             st.session_state["show_wrapped"] = True
             st.session_state["wrapped_slide"] = 0
             st.balloons()
