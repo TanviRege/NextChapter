@@ -1624,10 +1624,10 @@ st.markdown(
     """
     <style>
     /* Primary Action Buttons (Proceed, Generate Wrapped, Enrich, Import, etc.) */
-    button[kind="primary"],
-    button[data-testid="baseButton-primary"],
-    div[data-testid="stButton"] > button[kind="primary"],
-    div[data-testid="stDownloadButton"] > button[kind="primary"] {
+    button[kind="primary"]:not(:disabled),
+    button[data-testid="baseButton-primary"]:not(:disabled),
+    div[data-testid="stButton"] > button[kind="primary"]:not(:disabled),
+    div[data-testid="stDownloadButton"] > button[kind="primary"]:not(:disabled) {
         background: linear-gradient(135deg, #1D4ED8 0%, #3B82F6 100%) !important;
         color: #ffffff !important;
         border: none !important;
@@ -1638,37 +1638,55 @@ st.markdown(
         transition: all 0.25s ease-in-out !important;
     }
 
-    button[kind="primary"]:hover,
-    button[data-testid="baseButton-primary"]:hover,
-    div[data-testid="stButton"] > button[kind="primary"]:hover,
-    div[data-testid="stDownloadButton"] > button[kind="primary"]:hover {
+    button[kind="primary"]:not(:disabled):hover,
+    button[data-testid="baseButton-primary"]:not(:disabled):hover,
+    div[data-testid="stButton"] > button[kind="primary"]:not(:disabled):hover,
+    div[data-testid="stDownloadButton"] > button[kind="primary"]:not(:disabled):hover {
         transform: translateY(-2px) !important;
         box-shadow: 0 6px 20px rgba(37, 99, 235, 0.55) !important;
         filter: brightness(1.08) !important;
     }
 
-    button[kind="primary"]:active,
-    button[data-testid="baseButton-primary"]:active {
+    button[kind="primary"]:not(:disabled):active,
+    button[data-testid="baseButton-primary"]:not(:disabled):active {
         transform: translateY(0) !important;
         box-shadow: 0 2px 8px rgba(29, 78, 216, 0.3) !important;
     }
 
     /* Secondary Action Buttons */
-    button[kind="secondary"],
-    button[data-testid="baseButton-secondary"],
-    div[data-testid="stButton"] > button[kind="secondary"],
-    div[data-testid="stDownloadButton"] > button[kind="secondary"] {
+    button[kind="secondary"]:not(:disabled),
+    button[data-testid="baseButton-secondary"]:not(:disabled),
+    div[data-testid="stButton"] > button[kind="secondary"]:not(:disabled),
+    div[data-testid="stDownloadButton"] > button[kind="secondary"]:not(:disabled) {
         border-radius: 12px !important;
         border: 1px solid rgba(255, 255, 255, 0.18) !important;
         font-weight: 500 !important;
         transition: all 0.2s ease-in-out !important;
     }
 
-    button[kind="secondary"]:hover,
-    button[data-testid="baseButton-secondary"]:hover {
+    button[kind="secondary"]:not(:disabled):hover,
+    button[data-testid="baseButton-secondary"]:not(:disabled):hover {
         border-color: #3B82F6 !important;
         color: #60A5FA !important;
         background: rgba(59, 130, 246, 0.08) !important;
+    }
+
+    /* Disabled Buttons (Greyed out) */
+    button:disabled,
+    button[disabled],
+    div[data-testid="stButton"] > button:disabled,
+    div[data-testid="stButton"] > button[disabled],
+    div[data-testid="stDownloadButton"] > button:disabled,
+    div[data-testid="stDownloadButton"] > button[disabled] {
+        background: #2D3748 !important;
+        color: #94A3B8 !important;
+        border: 1px solid #4B5563 !important;
+        border-radius: 12px !important;
+        box-shadow: none !important;
+        cursor: not-allowed !important;
+        opacity: 0.65 !important;
+        transform: none !important;
+        filter: grayscale(1) !important;
     }
 
     /* Active Tabs Accent */
@@ -1694,6 +1712,8 @@ if "initialized" not in st.session_state:
     st.session_state["initialized"] = True
 st.title("NextChapter 📚")
 
+has_data = table_has_data()
+
 # ── Step 1: Import section ────────────────────────────────────────────────────────────
 st.markdown("### Step 1: Upload CSV/Paste Your Reading List")
 st.markdown(
@@ -1710,6 +1730,7 @@ with tab_upload:
         "Upload a CSV file",
         type=["csv"],
         label_visibility="collapsed",
+        disabled=has_data,
     )
 
     with open(TEMPLATE_PATH, "rb") as template_file:
@@ -1723,24 +1744,35 @@ with tab_upload:
         mime="text/csv",
     )
 
-    if uploaded_file:
-        tmp_path = f"/tmp/{uploaded_file.name}"
-        with open(tmp_path, "wb") as f:
-            f.write(uploaded_file.getbuffer())
+    if not has_data:
+        if uploaded_file:
+            tmp_path = f"/tmp/{uploaded_file.name}"
+            with open(tmp_path, "wb") as f:
+                f.write(uploaded_file.getbuffer())
 
-        if st.button("Proceed", type="primary", key="btn_import_csv"):
-            try:
-                df_imported = csv_to_sqlite(tmp_path)
+            if st.button("Proceed", type="primary", key="btn_import_csv"):
+                try:
+                    df_imported = csv_to_sqlite(tmp_path)
+                    st.session_state["show_wrapped"] = False
+                    st.session_state["is_enriched"] = False
+                    clear_recommendations_state()
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Import failed: {e}")
+        else:
+            st.button("Proceed", type="primary", key="btn_import_csv_placeholder", disabled=True)
+    else:
+        col_proc, col_reset = st.columns([1, 4])
+        with col_proc:
+            st.button("Proceed", type="primary", key="btn_import_csv_disabled", disabled=True)
+        with col_reset:
+            if st.button("🔄 Start Over / Upload New List", type="secondary", key="btn_reset_upload"):
+                if os.path.exists(DB_NAME):
+                    os.remove(DB_NAME)
                 st.session_state["show_wrapped"] = False
                 st.session_state["is_enriched"] = False
                 clear_recommendations_state()
-                st.success(
-                    f"✅ Imported **{len(df_imported)} rows × {len(df_imported.columns)} columns** "
-                    f"into `{TABLE_NAME}`"
-                )
                 st.rerun()
-            except Exception as e:
-                st.error(f"Import failed: {e}")
 
 with tab_paste:
     st.markdown("Paste your reading list below. Each book should be on its own line:")
@@ -1749,37 +1781,41 @@ with tab_paste:
         height=200,
         placeholder="Example: The Nightingale by Kristin Hannah, 5",
         label_visibility="collapsed",
+        disabled=has_data,
     )
 
-    if st.button("Proceed", type="primary", key="btn_parse_text"):
-        if not user_text.strip():
-            st.warning("Please paste some text first.")
-        else:
-            try:
-                parsed_df, skipped = parse_book_text_input(user_text)
-                if parsed_df.empty:
-                    st.error("Could not parse any books from the provided text. Please check the format.")
-                else:
-                    df_goodreads = to_goodreads_df(parsed_df)
-                    df_to_sqlite(df_goodreads)
-                    st.session_state["show_wrapped"] = False
-                    st.session_state["is_enriched"] = False
-                    clear_recommendations_state()
-                    st.success(
-                        f"✅ Parsed and imported **{len(df_goodreads)} books** into `{TABLE_NAME}`!"
-                    )
-                    if skipped:
-                        st.warning(
-                            f"⚠️ Could not parse {len(skipped)} line(s): "
-                            + ", ".join([f"line {num}" for num, _ in skipped])
-                        )
-                    st.rerun()
-            except Exception as e:
-                st.error(f"Text parsing failed: {e}")
+    if not has_data:
+        if st.button("Proceed", type="primary", key="btn_parse_text"):
+            if not user_text.strip():
+                st.warning("Please paste some text first.")
+            else:
+                try:
+                    parsed_df, skipped = parse_book_text_input(user_text)
+                    if parsed_df.empty:
+                        st.error("Could not parse any books from the provided text. Please check the format.")
+                    else:
+                        df_goodreads = to_goodreads_df(parsed_df)
+                        df_to_sqlite(df_goodreads)
+                        st.session_state["show_wrapped"] = False
+                        st.session_state["is_enriched"] = False
+                        clear_recommendations_state()
+                        st.rerun()
+                except Exception as e:
+                    st.error(f"Text parsing failed: {e}")
+    else:
+        col_proc, col_reset = st.columns([1, 4])
+        with col_proc:
+            st.button("Proceed", type="primary", key="btn_parse_text_disabled", disabled=True)
+        with col_reset:
+            if st.button("🔄 Start Over / Paste New List", type="secondary", key="btn_reset_paste"):
+                if os.path.exists(DB_NAME):
+                    os.remove(DB_NAME)
+                st.session_state["show_wrapped"] = False
+                st.session_state["is_enriched"] = False
+                clear_recommendations_state()
+                st.rerun()
 
 # ── Check Data Presence ───────────────────────────────────────────────────────
-has_data = table_has_data()
-
 if not has_data:
     st.session_state["show_wrapped"] = False
     st.session_state["is_enriched"] = False
@@ -1788,9 +1824,10 @@ if not has_data:
 # ── Step 2: Mandatory Enrichment ──────────────────────────────────────────────
 is_enriched = st.session_state.get("is_enriched", False) or table_is_enriched()
 
+st.divider()
+st.subheader("Step 2: Enrich with Open Library")
+
 if not is_enriched:
-    st.divider()
-    st.subheader("Step 2: Enrich with Open Library")
     st.info(
         "Click the button below to match your books against Open Library and fetch genres, page counts, community ratings, and cover images needed for your Wrapped stats."
     )
@@ -1807,14 +1844,16 @@ if not is_enriched:
             progress_bar.empty()
             st.session_state["is_enriched"] = True
             st.session_state["show_wrapped"] = False
-            st.success(f"✅ Successfully matched and enriched {matches}/{len(raw_df)} books with Open Library data!")
             st.rerun()
     st.stop()
+else:
+    st.button("Proceed", type="primary", key="btn_enrich_mandatory_done", disabled=True)
+    st.success("✅ Catalog enriched with Open Library data.")
 
 # ── Step 3: Editable Table & Wrapped Recap ────────────────────────────────────
 st.divider()
 
-st.subheader("Review your table and edit if required:")
+st.subheader("Step 3: Review your table and edit if required")
 
 try:
     df = load_table()
