@@ -1617,7 +1617,7 @@ def render_recommendations_section(catalog_df: pd.DataFrame):
     session_id = st.session_state.get("session_id", "default")
 
     refresh_count = st.session_state.get("refresh_count", 0)
-    col_btn, col_stats = st.columns([1, 2])
+    col_btn, _ = st.columns([1, 2])
     with col_btn:
         if refresh_count < 1:
             if st.button("🔄 Refresh Recommendations", type="secondary", key="btn_refresh_recs"):
@@ -1640,11 +1640,6 @@ def render_recommendations_section(catalog_df: pd.DataFrame):
                     st.rerun()
         else:
             st.button("🔄 Refresh Limit Reached (1/1 used)", type="secondary", disabled=True, key="btn_refresh_recs_disabled")
-
-    agree_count = len([b for b in picks if clean_book_title(b["title"]) in interested_titles])
-    agree_pct = round((agree_count / len(picks)) * 100) if picks else 0
-    with col_stats:
-        st.caption(f"🎯 **Session Agreement**: {agree_count}/{len(picks)} books marked Interested ({agree_pct}%)")
 
     cols = st.columns(len(picks))
     for idx, b in enumerate(picks):
@@ -1732,29 +1727,6 @@ def render_recommendations_section(catalog_df: pd.DataFrame):
                         st.session_state["recommendations"].pop(idx)
                         st.toast(f"Marked '{b['title']}' as read!")
                     st.rerun()
-
-    st.markdown("<div style='margin-top: 25px;'></div>", unsafe_allow_html=True)
-    with st.expander("📊 Recommendation Engine Analytics & Historical Feedback", expanded=False):
-        df_feed = fetch_feedback_summary()
-        if df_feed.empty:
-            st.info("No recommendation feedback recorded yet.")
-        else:
-            tot_int = len(df_feed[df_feed["action"] == "interested"])
-            tot_read = len(df_feed[df_feed["action"] == "already_read"])
-            tot_sess = df_feed["session_id"].nunique()
-            overall_rate = round((tot_int / (tot_int + tot_read)) * 100, 1) if (tot_int + tot_read) > 0 else 0.0
-
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("Total Visitors / Sessions", tot_sess)
-            m2.metric("Total 'Interested' (Agreement)", tot_int)
-            m3.metric("Total 'Already Read' (Replacements)", tot_read)
-            m4.metric("Engine Agreement Rate", f"{overall_rate}%")
-
-            st.dataframe(
-                df_feed[["timestamp", "session_id", "title", "author", "taste_match_pct", "action"]],
-                use_container_width=True,
-                hide_index=True,
-            )
 
 
 # ── Page config ──────────────────────────────────────────────────────────────
