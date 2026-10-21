@@ -2111,3 +2111,25 @@ try:
 
 except Exception as e:
     st.error(f"Could not load table: {e}")
+
+
+def render_feedback_export_widget():
+    st.markdown("<div style='margin-top: 50px;'></div>", unsafe_allow_html=True)
+    with st.expander("📊 Beta Evaluation Data (Admin)", expanded=False):
+        df_feed = fetch_feedback_summary()
+        if not df_feed.empty:
+            st.caption(f"Logged **{len(df_feed)} interactions** across **{df_feed['session_id'].nunique()} visitor sessions**.")
+            csv_data = df_feed.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                label="📥 Download feedback.csv",
+                data=csv_data,
+                file_name="nextchapter_feedback.csv",
+                mime="text/csv",
+                key="btn_download_feedback_csv",
+                use_container_width=True,
+            )
+        else:
+            st.caption("No beta interactions recorded yet. They will appear here once visitors interact with recommendations.")
+
+
+render_feedback_export_widget()
