@@ -5,11 +5,13 @@ Tell it the books you loved. It tells you what to read next, and why it is worth
                                                                                                                                         
 To evaluate recommendation quality, I initially implemented a textbook **Leave-One-Out holdout test** across 37 highly rated (4.0 +) books by sequentially hiding one favorite book, rebuilding the user taste profile without it, and checking if the engine recovered the hidden title in its top 5 picks (**Recall@5**).                                                                                              
 The test yielded **0% Recall@5**, which revealed a fundamental data science insight:                                                
-  1. **The Incomplete Ground Truth Problem**: In an open catalog with millions of books (Open Library), hiding one book does not make 
+  1. **Sample Size & Generalizability ($n=37, N=1$)**: A single user's reading history of 37 books offers a **directional case study**,   not statistical proof. At this sample size, individual quirks in one person's catalog disproportionately skew aggregate percentages.
+  
+  2. **The Incomplete Ground Truth Problem**: In an open catalog with millions of books (Open Library), hiding one book does not make 
   it the *only* valid recommendation. In fact, **3 of the 5 books recommended during the test were titles the reader had already read   
   and loved in prior years** (a 60% real-world hit rate), yet the offline test penalized them as complete failures.
   
-  2. **The Outlier Erasure Trap**: Hiding a standalone, high-rated book in a genre (e.g., the reader's single historical novel) erased
+  3. **The Outlier Erasure Trap**: Hiding a standalone, high-rated book in a genre (e.g., the reader's single historical novel) erased
   the only evidence of that interest. The engine correctly recommended books matching the remaining profile, which mathematically       
   ensured the hidden book would miss.
   
