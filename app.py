@@ -59,6 +59,21 @@ def fetch_feedback_summary(db_name=FEEDBACK_DB) -> pd.DataFrame:
     except Exception:
         return pd.DataFrame()
 
+
+def clear_feedback_db(db_name=FEEDBACK_DB):
+    init_feedback_db(db_name)
+    try:
+        conn = sqlite3.connect(db_name)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM recommendation_feedback")
+        conn.commit()
+        cursor.execute("VACUUM")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
 GOODREADS_COLUMNS = [
     "Book Id", "Title", "Author", "Author l-f", "Additional Authors",
     "ISBN", "ISBN13", "My Rating", "Average Rating", "Publisher",
@@ -1730,11 +1745,19 @@ def render_recommendations_section(catalog_df: pd.DataFrame):
 
 
 # ── Page config ──────────────────────────────────────────────────────────────
+is_admin_mode = False
+try:
+    admin_arg = str(st.query_params.get("admin", "")).strip().lower()
+    if admin_arg in ("true", "1", "yes", "tanvi"):
+        is_admin_mode = True
+except Exception:
+    pass
+
 st.set_page_config(
     page_title="NextChapter",
     page_icon="📚",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="expanded" if is_admin_mode else "collapsed",
 )
 
 # ── Custom Royal Blue Theme Styles ───────────────────────────────────────────
@@ -1833,31 +1856,37 @@ if "session_id" not in st.session_state:
 if "interested_titles" not in st.session_state:
     st.session_state["interested_titles"] = set()
 
-with st.sidebar:
-    st.markdown("### 📊 Evaluation Admin")
-    df_feed = fetch_feedback_summary()
-    if not df_feed.empty:
-        col_m1, col_m2 = st.columns(2)
-        col_m1.metric("Interactions", len(df_feed))
-        col_m2.metric("Sessions", df_feed["session_id"].nunique())
+if is_admin_mode:
+    with st.sidebar:
+        st.markdown("### 📊 Evaluation Admin")
+        df_feed = fetch_feedback_summary()
+        if not df_feed.empty:
+            col_m1, col_m2 = st.columns(2)
+            col_m1.metric("Interactions", len(df_feed))
+            col_m2.metric("Sessions", df_feed["session_id"].nunique())
 
-        tot_int = len(df_feed[df_feed["action"] == "interested"])
-        tot_read = len(df_feed[df_feed["action"] == "already_read"])
-        prec = round((tot_int / (tot_int + tot_read)) * 100, 1) if (tot_int + tot_read) > 0 else 0.0
-        st.metric("Live Precision", f"{prec}%")
+            tot_int = len(df_feed[df_feed["action"] == "interested"])
+            tot_read = len(df_feed[df_feed["action"] == "already_read"])
+            prec = round((tot_int / (tot_int + tot_read)) * 100, 1) if (tot_int + tot_read) > 0 else 0.0
+            st.metric("Live Precision", f"{prec}%")
 
-        csv_data = df_feed.to_csv(index=False).encode("utf-8")
-        st.download_button(
-            label="📥 Download feedback.csv",
-            data=csv_data,
-            file_name="nextchapter_feedback.csv",
-            mime="text/csv",
-            key="btn_sidebar_download_feedback",
-            use_container_width=True,
-            type="primary",
-        )
-    else:
-        st.caption("No beta interactions recorded yet. They will appear here once visitors interact with recommendations.")
+            csv_data = df_feed.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                label="📥 Download feedback.csv",
+                data=csv_data,
+                file_name="nextchapter_feedback.csv",
+                mime="text/csv",
+                key="btn_sidebar_download_feedback",
+                use_container_width=True,
+                type="primary",
+            )
+            st.markdown("<div style='margin-top: 15px;'></div>", unsafe_allow_html=True)
+            if st.button("🗑️ Reset All Beta Feedback", type="secondary", use_container_width=True):
+                clear_feedback_db()
+                st.toast("Cleared all beta feedback!")
+                st.rerun()
+        else:
+            st.caption("No beta interactions recorded yet. They will appear here once visitors interact with recommendations.")
 
 st.title("NextChapter 📚")
 
