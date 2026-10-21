@@ -218,3 +218,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local databases and evaluation outputs
+*.db
+*.sqlite3
+evaluation_results.json
