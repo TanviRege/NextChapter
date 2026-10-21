@@ -1730,7 +1730,12 @@ def render_recommendations_section(catalog_df: pd.DataFrame):
 
 
 # ── Page config ──────────────────────────────────────────────────────────────
-st.set_page_config(page_title="NextChapter", page_icon="📚", layout="wide")
+st.set_page_config(
+    page_title="NextChapter",
+    page_icon="📚",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
 # ── Custom Royal Blue Theme Styles ───────────────────────────────────────────
 st.markdown(
@@ -1827,6 +1832,33 @@ if "session_id" not in st.session_state:
     st.session_state["session_id"] = str(uuid.uuid4())[:8]
 if "interested_titles" not in st.session_state:
     st.session_state["interested_titles"] = set()
+
+with st.sidebar:
+    st.markdown("### 📊 Evaluation Admin")
+    df_feed = fetch_feedback_summary()
+    if not df_feed.empty:
+        col_m1, col_m2 = st.columns(2)
+        col_m1.metric("Interactions", len(df_feed))
+        col_m2.metric("Sessions", df_feed["session_id"].nunique())
+
+        tot_int = len(df_feed[df_feed["action"] == "interested"])
+        tot_read = len(df_feed[df_feed["action"] == "already_read"])
+        prec = round((tot_int / (tot_int + tot_read)) * 100, 1) if (tot_int + tot_read) > 0 else 0.0
+        st.metric("Live Precision", f"{prec}%")
+
+        csv_data = df_feed.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            label="📥 Download feedback.csv",
+            data=csv_data,
+            file_name="nextchapter_feedback.csv",
+            mime="text/csv",
+            key="btn_sidebar_download_feedback",
+            use_container_width=True,
+            type="primary",
+        )
+    else:
+        st.caption("No beta interactions recorded yet. They will appear here once visitors interact with recommendations.")
+
 st.title("NextChapter 📚")
 
 has_data = table_has_data()
@@ -2111,25 +2143,3 @@ try:
 
 except Exception as e:
     st.error(f"Could not load table: {e}")
-
-
-def render_feedback_export_widget():
-    st.markdown("<div style='margin-top: 50px;'></div>", unsafe_allow_html=True)
-    with st.expander("📊 Beta Evaluation Data (Admin)", expanded=False):
-        df_feed = fetch_feedback_summary()
-        if not df_feed.empty:
-            st.caption(f"Logged **{len(df_feed)} interactions** across **{df_feed['session_id'].nunique()} visitor sessions**.")
-            csv_data = df_feed.to_csv(index=False).encode("utf-8")
-            st.download_button(
-                label="📥 Download feedback.csv",
-                data=csv_data,
-                file_name="nextchapter_feedback.csv",
-                mime="text/csv",
-                key="btn_download_feedback_csv",
-                use_container_width=True,
-            )
-        else:
-            st.caption("No beta interactions recorded yet. They will appear here once visitors interact with recommendations.")
-
-
-render_feedback_export_widget()
