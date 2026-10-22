@@ -9,6 +9,7 @@ import html
 import io
 import urllib.parse
 import uuid
+import threading
 from PIL import Image, ImageDraw, ImageFont
 from typing import Dict, Optional, Union, List
 
@@ -54,18 +55,22 @@ def log_recommendation_feedback(session_id: str, title: str, author: str, taste_
     try:
         webhook_url = st.secrets.get("GSHEETS_WEBHOOK_URL", "")
         if webhook_url:
-            requests.post(
-                webhook_url,
-                json={
-                    "session_id": session_id,
-                    "title": title,
-                    "author": author,
-                    "taste_match_pct": float(taste_match_pct or 0.0),
-                    "action": action,
-                    "ol_key": ol_key or "",
-                },
-                timeout=3,
-            )
+            payload = {
+                "session_id": session_id,
+                "title": title,
+                "author": author,
+                "taste_match_pct": float(taste_match_pct or 0.0),
+                "action": action,
+                "ol_key": ol_key or "",
+            }
+
+            def _post_async(url=webhook_url, data=payload):
+                try:
+                    requests.post(url, json=data, timeout=8)
+                except Exception:
+                    pass
+
+            threading.Thread(target=_post_async, daemon=True).start()
     except Exception:
         pass
 
