@@ -1636,6 +1636,16 @@ def render_recommendations_section(catalog_df: pd.DataFrame):
                     st.session_state["recommendations"] = picks
                     st.session_state["seen_recommendation_titles"] = {clean_book_title(p["title"]) for p in picks}
                     st.session_state["refresh_count"] = 0
+                    sess_id = st.session_state.get("session_id", "default")
+                    for p in picks:
+                        log_recommendation_feedback(
+                            session_id=sess_id,
+                            title=p["title"],
+                            author=p["author"],
+                            taste_match_pct=p.get("taste_match", 0),
+                            action="shown",
+                            ol_key=p.get("key"),
+                        )
                     st.rerun()
         return
 
@@ -1673,6 +1683,15 @@ def render_recommendations_section(catalog_df: pd.DataFrame):
                     st.session_state["recommendations"] = next_picks
                     st.session_state["seen_recommendation_titles"] = seen.union({clean_book_title(p["title"]) for p in next_picks})
                     st.session_state["refresh_count"] = 1
+                    for p in next_picks:
+                        log_recommendation_feedback(
+                            session_id=session_id,
+                            title=p["title"],
+                            author=p["author"],
+                            taste_match_pct=p.get("taste_match", 0),
+                            action="shown",
+                            ol_key=p.get("key"),
+                        )
                     st.rerun()
         else:
             st.button("🔄 Refresh Limit Reached (1/1 used)", type="secondary", disabled=True, key="btn_refresh_recs_disabled")
@@ -1758,6 +1777,14 @@ def render_recommendations_section(catalog_df: pd.DataFrame):
                         new_pick = replacements[0]
                         st.session_state["recommendations"][idx] = new_pick
                         st.session_state["seen_recommendation_titles"].add(clean_book_title(new_pick["title"]))
+                        log_recommendation_feedback(
+                            session_id=session_id,
+                            title=new_pick["title"],
+                            author=new_pick["author"],
+                            taste_match_pct=new_pick.get("taste_match", 0),
+                            action="shown",
+                            ol_key=new_pick.get("key"),
+                        )
                         st.toast(f"Replaced with '{new_pick['title']}'! 📚")
                     else:
                         st.session_state["recommendations"].pop(idx)
