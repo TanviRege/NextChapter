@@ -1893,7 +1893,7 @@ st.title("NextChapter 📚")
 has_data = table_has_data()
 
 # ── Step 1: Import section ────────────────────────────────────────────────────────────
-st.markdown("### Step 1: Upload CSV/Paste Your Reading List")
+st.markdown("### Step 1: Paste Your Reading List / Upload CSV")
 st.markdown(
     "<p style='font-size: 15px; color: gray; margin-top: -10px;'>"
     "Ratings should be on a scale of 1: Did Not Enjoy to 5: Loved It! (ratings given out of 10 will be divided by 2)."
@@ -1901,7 +1901,48 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-tab_upload, tab_paste = st.tabs(["Upload CSV", "Paste Text"])
+tab_paste, tab_upload = st.tabs(["Paste Text", "Upload CSV"])
+
+with tab_paste:
+    st.markdown("Paste your reading list below. Each book should be on its own line:")
+    user_text = st.text_area(
+        "Paste book list here:",
+        height=200,
+        placeholder="Example: Harry Potter and the Order of Phoenix, J.K. Rowling, 4.5",
+        label_visibility="collapsed",
+        disabled=has_data,
+    )
+
+    if not has_data:
+        if st.button("Proceed", type="primary", key="btn_parse_text"):
+            if not user_text.strip():
+                st.warning("Please paste some text first.")
+            else:
+                try:
+                    parsed_df, skipped = parse_book_text_input(user_text)
+                    if parsed_df.empty:
+                        st.error("Could not parse any books from the provided text. Please check the format.")
+                    else:
+                        df_goodreads = to_goodreads_df(parsed_df)
+                        df_to_sqlite(df_goodreads)
+                        st.session_state["show_wrapped"] = False
+                        st.session_state["is_enriched"] = False
+                        clear_recommendations_state()
+                        st.rerun()
+                except Exception as e:
+                    st.error(f"Text parsing failed: {e}")
+    else:
+        col_proc, col_reset = st.columns([1, 4])
+        with col_proc:
+            st.button("Proceed", type="primary", key="btn_parse_text_disabled", disabled=True)
+        with col_reset:
+            if st.button("🔄 Start Over / Paste New List", type="secondary", key="btn_reset_paste"):
+                if os.path.exists(DB_NAME):
+                    os.remove(DB_NAME)
+                st.session_state["show_wrapped"] = False
+                st.session_state["is_enriched"] = False
+                clear_recommendations_state()
+                st.rerun()
 
 with tab_upload:
     uploaded_file = st.file_uploader(
@@ -1945,47 +1986,6 @@ with tab_upload:
             st.button("Proceed", type="primary", key="btn_import_csv_disabled", disabled=True)
         with col_reset:
             if st.button("🔄 Start Over / Upload New List", type="secondary", key="btn_reset_upload"):
-                if os.path.exists(DB_NAME):
-                    os.remove(DB_NAME)
-                st.session_state["show_wrapped"] = False
-                st.session_state["is_enriched"] = False
-                clear_recommendations_state()
-                st.rerun()
-
-with tab_paste:
-    st.markdown("Paste your reading list below. Each book should be on its own line:")
-    user_text = st.text_area(
-        "Paste book list here:",
-        height=200,
-        placeholder="Example: The Nightingale by Kristin Hannah, 5",
-        label_visibility="collapsed",
-        disabled=has_data,
-    )
-
-    if not has_data:
-        if st.button("Proceed", type="primary", key="btn_parse_text"):
-            if not user_text.strip():
-                st.warning("Please paste some text first.")
-            else:
-                try:
-                    parsed_df, skipped = parse_book_text_input(user_text)
-                    if parsed_df.empty:
-                        st.error("Could not parse any books from the provided text. Please check the format.")
-                    else:
-                        df_goodreads = to_goodreads_df(parsed_df)
-                        df_to_sqlite(df_goodreads)
-                        st.session_state["show_wrapped"] = False
-                        st.session_state["is_enriched"] = False
-                        clear_recommendations_state()
-                        st.rerun()
-                except Exception as e:
-                    st.error(f"Text parsing failed: {e}")
-    else:
-        col_proc, col_reset = st.columns([1, 4])
-        with col_proc:
-            st.button("Proceed", type="primary", key="btn_parse_text_disabled", disabled=True)
-        with col_reset:
-            if st.button("🔄 Start Over / Paste New List", type="secondary", key="btn_reset_paste"):
                 if os.path.exists(DB_NAME):
                     os.remove(DB_NAME)
                 st.session_state["show_wrapped"] = False
