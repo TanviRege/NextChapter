@@ -10,6 +10,7 @@ import io
 import urllib.parse
 import uuid
 import threading
+import time
 from PIL import Image, ImageDraw, ImageFont
 from typing import Dict, Optional, Union, List
 
@@ -38,15 +39,18 @@ def init_feedback_db(db_name=FEEDBACK_DB):
     conn.close()
 
 
-def log_recommendation_feedback(session_id: str, title: str, author: str, taste_match_pct: float, action: str, ol_key: str = None, db_name=FEEDBACK_DB):
+def log_feedback_batch(items: List[Dict], db_name=FEEDBACK_DB):
+    if not items:
+        return
     init_feedback_db(db_name)
     try:
         conn = sqlite3.connect(db_name)
         cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO recommendation_feedback (session_id, timestamp, title, author, taste_match_pct, action, ol_key)
-            VALUES (?, datetime('now'), ?, ?, ?, ?, ?)
-        """, (session_id, title, author, float(taste_match_pct or 0.0), action, ol_key))
+        for it in items:
+            cursor.execute("""
+                INSERT INTO recommendation_feedback (session_id, timestamp, title, author, taste_match_pct, action, ol_key)
+                VALUES (?, datetime('now'), ?, ?, ?, ?, ?)
+            """, (it.get("session_id"), it.get("title"), it.get("author"), float(it.get("taste_match_pct") or 0.0), it.get("action"), it.get("ol_key")))
         conn.commit()
         conn.close()
     except Exception:
@@ -55,24 +59,35 @@ def log_recommendation_feedback(session_id: str, title: str, author: str, taste_
     try:
         webhook_url = st.secrets.get("GSHEETS_WEBHOOK_URL", "")
         if webhook_url:
-            payload = {
-                "session_id": session_id,
-                "title": title,
-                "author": author,
-                "taste_match_pct": float(taste_match_pct or 0.0),
-                "action": action,
-                "ol_key": ol_key or "",
-            }
+            def _worker(url=webhook_url, payload_list=list(items)):
+                for p in payload_list:
+                    try:
+                        requests.post(url, json={
+                            "session_id": p.get("session_id", ""),
+                            "title": p.get("title", ""),
+                            "author": p.get("author", ""),
+                            "taste_match_pct": float(p.get("taste_match_pct") or 0.0),
+                            "action": p.get("action", ""),
+                            "ol_key": p.get("ol_key") or "",
+                        }, timeout=8)
+                        time.sleep(0.15)
+                    except Exception:
+                        pass
 
-            def _post_async(url=webhook_url, data=payload):
-                try:
-                    requests.post(url, json=data, timeout=8)
-                except Exception:
-                    pass
-
-            threading.Thread(target=_post_async, daemon=True).start()
+            threading.Thread(target=_worker, daemon=False).start()
     except Exception:
         pass
+
+
+def log_recommendation_feedback(session_id: str, title: str, author: str, taste_match_pct: float, action: str, ol_key: str = None, db_name=FEEDBACK_DB):
+    log_feedback_batch([{
+        "session_id": session_id,
+        "title": title,
+        "author": author,
+        "taste_match_pct": taste_match_pct,
+        "action": action,
+        "ol_key": ol_key,
+    }], db_name=db_name)
 
 
 def fetch_feedback_summary(db_name=FEEDBACK_DB) -> pd.DataFrame:
@@ -1643,15 +1658,17 @@ def render_recommendations_section(catalog_df: pd.DataFrame):
                     st.session_state["seen_recommendation_titles"] = {clean_book_title(p["title"]) for p in picks}
                     st.session_state["refresh_count"] = 0
                     sess_id = st.session_state.get("session_id", "default")
-                    for p in picks:
-                        log_recommendation_feedback(
-                            session_id=sess_id,
-                            title=p["title"],
-                            author=p["author"],
-                            taste_match_pct=p.get("taste_match", 0),
-                            action="shown",
-                            ol_key=p.get("key"),
-                        )
+                    log_feedback_batch([
+                        {
+                            "session_id": sess_id,
+                            "title": p["title"],
+                            "author": p["author"],
+                            "taste_match_pct": p.get("taste_match", 0),
+                            "action": "shown",
+                            "ol_key": p.get("key"),
+                        }
+                        for p in picks
+                    ])
                     st.rerun()
         return
 
@@ -1689,15 +1706,17 @@ def render_recommendations_section(catalog_df: pd.DataFrame):
                     st.session_state["recommendations"] = next_picks
                     st.session_state["seen_recommendation_titles"] = seen.union({clean_book_title(p["title"]) for p in next_picks})
                     st.session_state["refresh_count"] = 1
-                    for p in next_picks:
-                        log_recommendation_feedback(
-                            session_id=session_id,
-                            title=p["title"],
-                            author=p["author"],
-                            taste_match_pct=p.get("taste_match", 0),
-                            action="shown",
-                            ol_key=p.get("key"),
-                        )
+                    log_feedback_batch([
+                        {
+                            "session_id": session_id,
+                            "title": p["title"],
+                            "author": p["author"],
+                            "taste_match_pct": p.get("taste_match", 0),
+                            "action": "shown",
+                            "ol_key": p.get("key"),
+                        }
+                        for p in next_picks
+                    ])
                     st.rerun()
         else:
             st.button("🔄 Refresh Limit Reached (1/1 used)", type="secondary", disabled=True, key="btn_refresh_recs_disabled")
