@@ -1768,7 +1768,7 @@ def render_recommendations_section(catalog_df: pd.DataFrame):
 # ── Page config ──────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="NextChapter",
-    page_icon="📚",
+    page_icon="📖",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
@@ -1877,13 +1877,21 @@ st.markdown(
             font-size: 3.4rem;
             font-weight: 800;
             letter-spacing: -0.5px;
-            background: linear-gradient(135deg, #93C5FD 0%, #3B82F6 45%, #1D4ED8 100%);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            color: #2563EB;
             margin: 0;
             display: inline-block;
-        ">NextChapter 📚</h1>
+        ">
+            <span style="
+                background: linear-gradient(135deg, #93C5FD 0%, #3B82F6 45%, #1D4ED8 100%);
+                -webkit-background-clip: text;
+                -webkit-text-fill-color: transparent;
+                color: #2563EB;
+            ">NextChapter</span>
+            <span style="
+                font-size: 2.8rem;
+                vertical-align: middle;
+                margin-left: 6px;
+            ">📖</span>
+        </h1>
     </div>
     """,
     unsafe_allow_html=True,
