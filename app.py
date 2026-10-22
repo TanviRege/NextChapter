@@ -1495,6 +1495,7 @@ def fetch_scored_candidates(catalog_df: pd.DataFrame) -> (List[Dict[str, object]
         score = (0.55 * subject_fit) + (0.20 * author_bonus) + (0.15 * community) + (0.10 * length_fit)
 
         scored_candidates.append({
+            "key": doc.get("key"),
             "title": title,
             "author": author,
             "pages": pages,
