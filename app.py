@@ -1350,6 +1350,90 @@ def calculate_length_fit(pages: Optional[float], p25: float = 300.0, p75: float 
     return max(0.0, 1.0 - (pages - p75) / 400.0)
 
 
+SPANISH_WORDS = {
+    "el", "la", "los", "las", "un", "una", "unos", "unas", "de", "del", "al", "en", "con",
+    "por", "para", "sin", "sobre", "entre", "como", "pero", "mas", "más", "este", "esta",
+    "estos", "estas", "su", "sus", "vida", "muerte", "amor", "tiempo", "años", "cuento",
+    "historia", "crónica", "novela", "libro",
+}
+ITALIAN_WORDS = {
+    "il", "lo", "la", "i", "gli", "le", "un", "uno", "una", "di", "del", "dello", "della",
+    "dei", "degli", "delle", "nel", "nella", "nei", "negli", "nelle", "sul", "sulla", "da",
+    "per", "tra", "fra", "con", "ed", "non", "che", "sono", "tutti", "tutto", "amore", "morte",
+    "storia", "libro", "vita",
+}
+FRENCH_WORDS = {
+    "le", "la", "les", "des", "du", "de", "dans", "avec", "pour", "sur", "un", "une", "qui",
+    "que", "est", "mort", "histoire", "livre", "vie",
+}
+GERMAN_WORDS = {
+    "der", "die", "das", "den", "dem", "des", "ein", "eine", "einer", "eines", "und", "mit",
+    "für", "von", "aus", "auf", "nicht", "buch", "leben",
+}
+ENG_WORDS = {
+    "the", "a", "an", "and", "of", "in", "to", "for", "with", "on", "at", "from", "by",
+    "about", "as", "into", "like", "through", "after", "over", "between", "out", "against",
+    "during", "without", "before", "under", "around", "among", "is", "are", "was", "were",
+    "be", "been", "being", "have", "has", "had", "do", "does", "did", "but", "if", "or",
+    "because", "until", "while", "my", "your", "his", "her", "its", "our", "their", "this",
+    "that", "these", "those",
+}
+
+
+def is_likely_english_title(title: str, doc_languages: Optional[List] = None) -> bool:
+    if not title:
+        return False
+    if doc_languages:
+        langs = [str(l).lower() for l in doc_languages]
+        if "eng" not in langs and not any("en" in l for l in langs):
+            return False
+
+    for ch in title:
+        cp = ord(ch)
+        if (
+            (0x0400 <= cp <= 0x04FF)  # Cyrillic
+            or (0x0600 <= cp <= 0x06FF)  # Arabic
+            or (0x4E00 <= cp <= 0x9FFF)  # CJK
+            or (0x3040 <= cp <= 0x30FF)  # Kana
+            or (0xAC00 <= cp <= 0xD7AF)  # Hangul
+            or (0x0900 <= cp <= 0x097F)  # Devanagari
+            or (0x0370 <= cp <= 0x03FF)  # Greek
+        ):
+            return False
+
+    if any(c in title for c in ["¿", "¡", "ß", "ñ", "Ñ"]):
+        return False
+
+    words = [re.sub(r"[^\w]", "", w).lower() for w in title.split()]
+    words = [w for w in words if w]
+    if not words:
+        return False
+
+    sp_count = sum(1 for w in words if w in SPANISH_WORDS)
+    it_count = sum(1 for w in words if w in ITALIAN_WORDS)
+    fr_count = sum(1 for w in words if w in FRENCH_WORDS)
+    de_count = sum(1 for w in words if w in GERMAN_WORDS)
+    eng_count = sum(1 for w in words if w in ENG_WORDS)
+
+    if len(words) >= 2:
+        first = words[0]
+        if first in {"el", "los", "del"} and eng_count == 0:
+            return False
+        if first in {"il", "lo", "gli"} and eng_count == 0:
+            return False
+        if first in {"le", "les", "des", "du"} and eng_count == 0:
+            return False
+        if first in {"der", "die", "das", "dem", "den"} and eng_count == 0:
+            return False
+        if first == "la" and (sp_count >= 1 or it_count >= 1 or fr_count >= 1) and eng_count == 0:
+            return False
+
+    if (sp_count >= 2 or it_count >= 2 or fr_count >= 2 or de_count >= 2) and eng_count == 0:
+        return False
+
+    return True
+
+
 def fetch_scored_candidates(catalog_df: pd.DataFrame) -> (List[Dict[str, object]], bool):
     if catalog_df.empty:
         return [], False
@@ -1415,7 +1499,7 @@ def fetch_scored_candidates(catalog_df: pd.DataFrame) -> (List[Dict[str, object]
             "q": f'subject:"{subj}" language:eng',
             "sort": "readinglog",
             "limit": 15,
-            "fields": "key,title,author_name,number_of_pages_median,ratings_average,ratings_count,subject,cover_i",
+            "fields": "key,title,author_name,number_of_pages_median,ratings_average,ratings_count,subject,cover_i,language",
         }
         try:
             resp = requests.get(url, params=params, headers=headers, timeout=8)
@@ -1424,6 +1508,8 @@ def fetch_scored_candidates(catalog_df: pd.DataFrame) -> (List[Dict[str, object]
                     t = doc.get("title")
                     c_title = clean_book_title(t)
                     if not c_title or c_title in seen_titles:
+                        continue
+                    if not is_likely_english_title(c_title, doc.get("language")):
                         continue
                     if not reads_children and is_children_book(doc.get("subject", [])):
                         continue
@@ -1436,10 +1522,10 @@ def fetch_scored_candidates(catalog_df: pd.DataFrame) -> (List[Dict[str, object]
     for auth in list(affinity_authors)[:2]:
         url = "https://openlibrary.org/search.json"
         params = {
-            "author": auth,
+            "q": f'author:"{auth}" language:eng',
             "sort": "readinglog",
-            "limit": 6,
-            "fields": "key,title,author_name,number_of_pages_median,ratings_average,ratings_count,subject,cover_i",
+            "limit": 8,
+            "fields": "key,title,author_name,number_of_pages_median,ratings_average,ratings_count,subject,cover_i,language",
         }
         try:
             resp = requests.get(url, params=params, headers=headers, timeout=8)
@@ -1448,6 +1534,8 @@ def fetch_scored_candidates(catalog_df: pd.DataFrame) -> (List[Dict[str, object]
                     t = doc.get("title")
                     c_title = clean_book_title(t)
                     if not c_title or c_title in seen_titles:
+                        continue
+                    if not is_likely_english_title(c_title, doc.get("language")):
                         continue
                     if not reads_children and is_children_book(doc.get("subject", [])):
                         continue
@@ -1463,7 +1551,7 @@ def fetch_scored_candidates(catalog_df: pd.DataFrame) -> (List[Dict[str, object]
             "q": "subject:memoir OR subject:history language:eng",
             "sort": "readinglog",
             "limit": 10,
-            "fields": "key,title,author_name,number_of_pages_median,ratings_average,ratings_count,subject,cover_i",
+            "fields": "key,title,author_name,number_of_pages_median,ratings_average,ratings_count,subject,cover_i,language",
         }
         try:
             resp = requests.get(url, params=params, headers=headers, timeout=8)
@@ -1472,6 +1560,8 @@ def fetch_scored_candidates(catalog_df: pd.DataFrame) -> (List[Dict[str, object]
                     t = doc.get("title")
                     c_title = clean_book_title(t)
                     if not c_title or c_title in seen_titles:
+                        continue
+                    if not is_likely_english_title(c_title, doc.get("language")):
                         continue
                     if not reads_children and is_children_book(doc.get("subject", [])):
                         continue
@@ -1571,34 +1661,18 @@ def select_diverse_recommendations(
         specific = [t for t in tags if t not in GENERIC_SUBJECTS]
         return specific[0] if specific else (tags[0] if tags else "general")
 
-    def assign_section_metadata(cand, top_s):
+    def assign_pick_reason(cand, top_s):
         top_s_title = top_s.title()
         if cand.get("author_bonus", 0.0) == 1.0:
-            sec_title = f"Because you loved {cand['author']}"
-            sec_icon = "✍️"
-            sec_sub = f"Acclaimed titles from your top-rated author {cand['author']}"
-            reason = f"By your favorite author {cand['author']}"
+            return f"Because you loved {cand['author']}"
         elif cand.get("is_nonfiction", False):
-            sec_title = "Curated Nonfiction for You"
-            sec_icon = "💡"
-            sec_sub = "Compelling true stories, memoirs, and real-world perspectives"
-            reason = f"Curated nonfiction match in {top_s_title}"
+            return f"Because you enjoy real-world stories & memoirs in {top_s_title}"
         elif cand.get("subject_fit", 0.0) >= 0.55:
-            sec_title = f"Because you were hooked on {top_s_title}"
-            sec_icon = "🔮"
-            sec_sub = f"Captivating books matching your passion for {top_s_title}"
-            reason = f"High genre match based on your top {top_s_title} reads"
+            return f"Because you were hooked on {top_s_title}"
         elif cand.get("length_fit", 0.0) >= 0.9 and cand.get("pages"):
-            sec_title = "Since you typically read books of this length"
-            sec_icon = "🎯"
-            sec_sub = "Tailored to your ideal pacing and typical book length"
-            reason = f"Matches your typical book length ({int(cand['pages'])}p)"
+            return f"Since you typically read books of this length ({int(cand['pages'])}p)"
         else:
-            sec_title = "Top overall matches for your reading profile"
-            sec_icon = "✨"
-            sec_sub = "Beloved titles with outstanding reader acclaim"
-            reason = f"High community acclaim ({cand.get('ratings_avg', 0)}★) & taste match"
-        return sec_title, sec_icon, sec_sub, reason
+            return f"Because you liked top-rated {top_s_title} reads"
 
     picks = []
     subject_counts = {}
@@ -1612,11 +1686,7 @@ def select_diverse_recommendations(
                     continue
                 cand_copy = dict(cand)
                 top_s = get_primary_subject(cand)
-                sec_t, sec_i, sec_s, r = assign_section_metadata(cand_copy, top_s)
-                cand_copy["section_title"] = sec_t
-                cand_copy["section_icon"] = sec_i
-                cand_copy["section_subtitle"] = sec_s
-                cand_copy["pick_reason"] = r
+                cand_copy["pick_reason"] = assign_pick_reason(cand_copy, top_s)
                 picks.append(cand_copy)
                 auth = cand["author"].lower()
                 subject_counts[top_s] = 1
@@ -1638,11 +1708,7 @@ def select_diverse_recommendations(
             continue
 
         cand_copy = dict(cand)
-        sec_t, sec_i, sec_s, r = assign_section_metadata(cand_copy, top_s)
-        cand_copy["section_title"] = sec_t
-        cand_copy["section_icon"] = sec_i
-        cand_copy["section_subtitle"] = sec_s
-        cand_copy["pick_reason"] = r
+        cand_copy["pick_reason"] = assign_pick_reason(cand_copy, top_s)
         picks.append(cand_copy)
 
         subject_counts[top_s] = subject_counts.get(top_s, 0) + 1
@@ -1758,114 +1824,81 @@ def render_recommendations_section(catalog_df: pd.DataFrame):
         else:
             st.button("🔄 Refresh Limit Reached (1/1 used)", type="secondary", disabled=True, key="btn_refresh_recs_disabled")
 
-    # Group picks into Netflix-style rows/sub-sections
-    grouped_sections = {}
+    cols = st.columns(len(picks))
     for idx, b in enumerate(picks):
-        sec_title = b.get("section_title") or "Recommended for You"
-        sec_icon = b.get("section_icon") or "📚"
-        sec_sub = b.get("section_subtitle") or "Hand-picked for your reading taste"
-        if sec_title not in grouped_sections:
-            grouped_sections[sec_title] = {
-                "icon": sec_icon,
-                "subtitle": sec_sub,
-                "items": [],
-            }
-        grouped_sections[sec_title]["items"].append((idx, b))
+        c_title = clean_book_title(b["title"])
+        is_interested = c_title in interested_titles
+        is_read = c_title in read_titles
+        ol_url = f"https://openlibrary.org{b['key']}" if b.get("key") else f"https://openlibrary.org/search?q={urllib.parse.quote(b['title'])}"
 
-    for sec_title, sec_info in grouped_sections.items():
-        st.markdown(
-            f"""
-            <div style="margin-top: 30px; margin-bottom: 14px; padding-bottom: 8px; border-bottom: 1px solid rgba(255, 255, 255, 0.12);">
-                <div style="font-size: 1.25rem; font-weight: 700; color: #F1F5F9; display: flex; align-items: center; gap: 8px;">
-                    <span style="font-size: 1.35rem;">{sec_info['icon']}</span>
-                    <span>{sec_title}</span>
-                </div>
-                <div style="font-size: 0.85rem; color: #94A3B8; margin-top: 2px;">
-                    {sec_info['subtitle']}
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-        items = sec_info["items"]
-        num_cols = max(4, len(items))
-        cols = st.columns(num_cols)
-
-        for c_i, (idx, b) in enumerate(items):
-            c_title = clean_book_title(b["title"])
-            is_interested = c_title in interested_titles
-            is_read = c_title in read_titles
-            ol_url = f"https://openlibrary.org{b['key']}" if b.get("key") else f"https://openlibrary.org/search?q={urllib.parse.quote(b['title'])}"
-
-            with cols[c_i]:
-                with st.container(border=True):
-                    if b.get("cover_url"):
-                        st.markdown(
-                            f"""<div style="text-align: center; margin-bottom: 8px;">
-                                <img src="{b['cover_url']}" style="width: 100%; height: 165px; object-fit: cover; border-radius: 8px; box-shadow: 0 4px 10px rgba(0,0,0,0.3);" />
-                            </div>""",
-                            unsafe_allow_html=True,
-                        )
-                    else:
-                        st.markdown(
-                            """<div style="height: 165px; background: #23232c; border-radius: 8px; display: flex; align-items: center; justify-content: center; color: #888; font-size: 11px; margin-bottom: 8px;">No Cover</div>""",
-                            unsafe_allow_html=True,
-                        )
-
+        with cols[idx]:
+            with st.container(border=True):
+                if b.get("cover_url"):
                     st.markdown(
-                        f"""<div style="background: #2563EB; color: #ffffff; font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 999px; display: inline-block; margin-bottom: 6px;">
-                            {b['taste_match']}% MATCH
+                        f"""<div style="text-align: center; margin-bottom: 8px;">
+                            <img src="{b['cover_url']}" style="width: 100%; height: 165px; object-fit: cover; border-radius: 8px; box-shadow: 0 4px 10px rgba(0,0,0,0.3);" />
                         </div>""",
                         unsafe_allow_html=True,
                     )
-
-                    st.markdown(f"**{b['title']}**\n\n<small style='color: #cbd5e1;'>by {b['author']}</small>", unsafe_allow_html=True)
-
-                    pages_t = f"📖 {int(b['pages'])}p" if b.get("pages") else "📖 N/A"
-                    comm_t = f"★ {b['ratings_avg']}" if b.get("ratings_avg") else "★ N/A"
-                    st.caption(f"{pages_t} • {comm_t}")
-
-                    st.markdown(f"<div style='font-size: 11px; color: #93c5fd; font-style: italic; min-height: 38px; margin-bottom: 4px;'>💡 {b.get('pick_reason', '')}</div>", unsafe_allow_html=True)
-
+                else:
                     st.markdown(
-                        f"""<div style="margin: 4px 0 10px 0;">
-                            <a href="{ol_url}" target="_blank" style="display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 600; color: #60A5FA; text-decoration: none; padding: 3px 8px; background: rgba(59, 130, 246, 0.12); border: 1px solid rgba(59, 130, 246, 0.3); border-radius: 6px;">
-                                <span>📖</span> Read Synopsis ↗
-                            </a>
-                        </div>""",
+                        """<div style="height: 165px; background: #23232c; border-radius: 8px; display: flex; align-items: center; justify-content: center; color: #888; font-size: 11px; margin-bottom: 8px;">No Cover</div>""",
                         unsafe_allow_html=True,
                     )
 
-                    if is_interested:
-                        st.button("⭐ Interested", key=f"btn_int_{idx}_{c_title[:10]}", disabled=True, use_container_width=True)
-                    else:
-                        if st.button("⭐ Interested!", key=f"btn_int_{idx}_{c_title[:10]}", type="secondary", use_container_width=True):
-                            log_recommendation_feedback(
-                                session_id=session_id,
-                                title=b["title"],
-                                author=b["author"],
-                                taste_match_pct=b.get("taste_match", 0),
-                                action="interested",
-                                ol_key=b.get("key"),
-                            )
-                            st.session_state["interested_titles"].add(c_title)
-                            st.rerun()
+                st.markdown(
+                    f"""<div style="background: #2563EB; color: #ffffff; font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 999px; display: inline-block; margin-bottom: 6px;">
+                        {b['taste_match']}% MATCH
+                    </div>""",
+                    unsafe_allow_html=True,
+                )
 
-                    if is_read:
-                        st.button("✓ I've Read This", key=f"btn_read_{idx}_{c_title[:10]}", disabled=True, use_container_width=True)
-                    else:
-                        if st.button("I've Read This!", key=f"btn_read_{idx}_{c_title[:10]}", type="secondary", use_container_width=True):
-                            log_recommendation_feedback(
-                                session_id=session_id,
-                                title=b["title"],
-                                author=b["author"],
-                                taste_match_pct=b.get("taste_match", 0),
-                                action="already_read",
-                                ol_key=b.get("key"),
-                            )
-                            st.session_state["read_titles"].add(c_title)
-                            st.rerun()
+                st.markdown(f"**{b['title']}**\n\n<small style='color: #cbd5e1;'>by {b['author']}</small>", unsafe_allow_html=True)
+
+                pages_t = f"📖 {int(b['pages'])}p" if b.get("pages") else "📖 N/A"
+                comm_t = f"★ {b['ratings_avg']}" if b.get("ratings_avg") else "★ N/A"
+                st.caption(f"{pages_t} • {comm_t}")
+
+                st.markdown(f"<div style='font-size: 11px; color: #93c5fd; font-style: italic; min-height: 40px; margin-bottom: 4px;'>💡 {b.get('pick_reason', '')}</div>", unsafe_allow_html=True)
+
+                st.markdown(
+                    f"""<div style="margin: 4px 0 10px 0;">
+                        <a href="{ol_url}" target="_blank" style="display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 600; color: #60A5FA; text-decoration: none; padding: 3px 8px; background: rgba(59, 130, 246, 0.12); border: 1px solid rgba(59, 130, 246, 0.3); border-radius: 6px;">
+                            <span>📖</span> Read Synopsis ↗
+                        </a>
+                    </div>""",
+                    unsafe_allow_html=True,
+                )
+
+                if is_interested:
+                    st.button("⭐ Interested", key=f"btn_int_{idx}_{c_title[:10]}", disabled=True, use_container_width=True)
+                else:
+                    if st.button("⭐ Interested!", key=f"btn_int_{idx}_{c_title[:10]}", type="secondary", use_container_width=True):
+                        log_recommendation_feedback(
+                            session_id=session_id,
+                            title=b["title"],
+                            author=b["author"],
+                            taste_match_pct=b.get("taste_match", 0),
+                            action="interested",
+                            ol_key=b.get("key"),
+                        )
+                        st.session_state["interested_titles"].add(c_title)
+                        st.rerun()
+
+                if is_read:
+                    st.button("✓ I've Read This", key=f"btn_read_{idx}_{c_title[:10]}", disabled=True, use_container_width=True)
+                else:
+                    if st.button("I've Read This!", key=f"btn_read_{idx}_{c_title[:10]}", type="secondary", use_container_width=True):
+                        log_recommendation_feedback(
+                            session_id=session_id,
+                            title=b["title"],
+                            author=b["author"],
+                            taste_match_pct=b.get("taste_match", 0),
+                            action="already_read",
+                            ol_key=b.get("key"),
+                        )
+                        st.session_state["read_titles"].add(c_title)
+                        st.rerun()
 
 
 # ── Page config ──────────────────────────────────────────────────────────────
