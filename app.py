@@ -1559,10 +1559,46 @@ def select_diverse_recommendations(
     if exclude_titles is None:
         exclude_titles = set()
 
+    GENERIC_SUBJECTS = {
+        "fiction", "general", "fiction / general", "nonfiction",
+        "accessible book", "protected daisy", "in library",
+        "lending library", "large type books", "open library staff picks",
+        "reading level", "classic literature", "paperback"
+    }
+
     def get_primary_subject(cand):
         tags = [str(s).lower() for s in cand.get("subjects", [])]
-        specific = [t for t in tags if t not in ("fiction", "general", "fiction / general", "nonfiction")]
+        specific = [t for t in tags if t not in GENERIC_SUBJECTS]
         return specific[0] if specific else (tags[0] if tags else "general")
+
+    def assign_section_metadata(cand, top_s):
+        top_s_title = top_s.title()
+        if cand.get("author_bonus", 0.0) == 1.0:
+            sec_title = f"Because you loved {cand['author']}"
+            sec_icon = "✍️"
+            sec_sub = f"Acclaimed titles from your top-rated author {cand['author']}"
+            reason = f"By your favorite author {cand['author']}"
+        elif cand.get("is_nonfiction", False):
+            sec_title = "Curated Nonfiction for You"
+            sec_icon = "💡"
+            sec_sub = "Compelling true stories, memoirs, and real-world perspectives"
+            reason = f"Curated nonfiction match in {top_s_title}"
+        elif cand.get("subject_fit", 0.0) >= 0.55:
+            sec_title = f"Because you were hooked on {top_s_title}"
+            sec_icon = "🔮"
+            sec_sub = f"Captivating books matching your passion for {top_s_title}"
+            reason = f"High genre match based on your top {top_s_title} reads"
+        elif cand.get("length_fit", 0.0) >= 0.9 and cand.get("pages"):
+            sec_title = "In your reading sweet spot"
+            sec_icon = "🎯"
+            sec_sub = "Tailored to your ideal pacing and book length"
+            reason = f"Pacing match in your sweet spot ({int(cand['pages'])}p)"
+        else:
+            sec_title = "Top overall matches for your reading profile"
+            sec_icon = "✨"
+            sec_sub = "Beloved titles with outstanding reader acclaim"
+            reason = f"High community acclaim ({cand.get('ratings_avg', 0)}★) & taste match"
+        return sec_title, sec_icon, sec_sub, reason
 
     picks = []
     subject_counts = {}
@@ -1575,9 +1611,13 @@ def select_diverse_recommendations(
                 if c_title in exclude_titles:
                     continue
                 cand_copy = dict(cand)
-                cand_copy["pick_reason"] = "Curated Nonfiction Anchor Pick"
-                picks.append(cand_copy)
                 top_s = get_primary_subject(cand)
+                sec_t, sec_i, sec_s, r = assign_section_metadata(cand_copy, top_s)
+                cand_copy["section_title"] = sec_t
+                cand_copy["section_icon"] = sec_i
+                cand_copy["section_subtitle"] = sec_s
+                cand_copy["pick_reason"] = r
+                picks.append(cand_copy)
                 auth = cand["author"].lower()
                 subject_counts[top_s] = 1
                 author_counts[auth] = 1
@@ -1597,18 +1637,12 @@ def select_diverse_recommendations(
         if subject_counts.get(top_s, 0) >= 2 or author_counts.get(auth, 0) >= 2:
             continue
 
-        reasons = []
-        if cand.get("author_bonus", 0.0) == 1.0:
-            reasons.append(f"Loved author ({cand['author']})")
-        if cand.get("length_fit", 0.0) == 1.0 and cand.get("pages"):
-            reasons.append(f"In sweet spot ({int(cand['pages'])} pages)")
-        if cand.get("subject_fit", 0.0) >= 0.7:
-            reasons.append(f"High genre match ({top_s.title()})")
-        if not reasons:
-            reasons.append("High taste & community match")
-
         cand_copy = dict(cand)
-        cand_copy["pick_reason"] = " • ".join(reasons)
+        sec_t, sec_i, sec_s, r = assign_section_metadata(cand_copy, top_s)
+        cand_copy["section_title"] = sec_t
+        cand_copy["section_icon"] = sec_i
+        cand_copy["section_subtitle"] = sec_s
+        cand_copy["pick_reason"] = r
         picks.append(cand_copy)
 
         subject_counts[top_s] = subject_counts.get(top_s, 0) + 1
@@ -1721,100 +1755,138 @@ def render_recommendations_section(catalog_df: pd.DataFrame):
         else:
             st.button("🔄 Refresh Limit Reached (1/1 used)", type="secondary", disabled=True, key="btn_refresh_recs_disabled")
 
-    cols = st.columns(len(picks))
+    # Group picks into Netflix-style rows/sub-sections
+    grouped_sections = {}
     for idx, b in enumerate(picks):
-        c_title = clean_book_title(b["title"])
-        is_interested = c_title in interested_titles
-        ol_url = f"https://openlibrary.org{b['key']}" if b.get("key") else f"https://openlibrary.org/search?q={urllib.parse.quote(b['title'])}"
+        sec_title = b.get("section_title") or "Recommended for You"
+        sec_icon = b.get("section_icon") or "📚"
+        sec_sub = b.get("section_subtitle") or "Hand-picked for your reading taste"
+        if sec_title not in grouped_sections:
+            grouped_sections[sec_title] = {
+                "icon": sec_icon,
+                "subtitle": sec_sub,
+                "items": [],
+            }
+        grouped_sections[sec_title]["items"].append((idx, b))
 
-        with cols[idx]:
-            with st.container(border=True):
-                if b.get("cover_url"):
+    for sec_title, sec_info in grouped_sections.items():
+        st.markdown(
+            f"""
+            <div style="margin-top: 30px; margin-bottom: 14px; padding-bottom: 8px; border-bottom: 1px solid rgba(255, 255, 255, 0.12);">
+                <div style="font-size: 1.25rem; font-weight: 700; color: #F1F5F9; display: flex; align-items: center; gap: 8px;">
+                    <span style="font-size: 1.35rem;">{sec_info['icon']}</span>
+                    <span>{sec_title}</span>
+                </div>
+                <div style="font-size: 0.85rem; color: #94A3B8; margin-top: 2px;">
+                    {sec_info['subtitle']}
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        items = sec_info["items"]
+        num_cols = max(4, len(items))
+        cols = st.columns(num_cols)
+
+        for c_i, (idx, b) in enumerate(items):
+            c_title = clean_book_title(b["title"])
+            is_interested = c_title in interested_titles
+            ol_url = f"https://openlibrary.org{b['key']}" if b.get("key") else f"https://openlibrary.org/search?q={urllib.parse.quote(b['title'])}"
+
+            with cols[c_i]:
+                with st.container(border=True):
+                    if b.get("cover_url"):
+                        st.markdown(
+                            f"""<div style="text-align: center; margin-bottom: 8px;">
+                                <img src="{b['cover_url']}" style="width: 100%; height: 165px; object-fit: cover; border-radius: 8px; box-shadow: 0 4px 10px rgba(0,0,0,0.3);" />
+                            </div>""",
+                            unsafe_allow_html=True,
+                        )
+                    else:
+                        st.markdown(
+                            """<div style="height: 165px; background: #23232c; border-radius: 8px; display: flex; align-items: center; justify-content: center; color: #888; font-size: 11px; margin-bottom: 8px;">No Cover</div>""",
+                            unsafe_allow_html=True,
+                        )
+
                     st.markdown(
-                        f"""<div style="text-align: center; margin-bottom: 8px;">
-                            <img src="{b['cover_url']}" style="width: 100%; height: 165px; object-fit: cover; border-radius: 8px; box-shadow: 0 4px 10px rgba(0,0,0,0.3);" />
+                        f"""<div style="background: #2563EB; color: #ffffff; font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 999px; display: inline-block; margin-bottom: 6px;">
+                            {b['taste_match']}% MATCH
                         </div>""",
                         unsafe_allow_html=True,
                     )
-                else:
+
+                    st.markdown(f"**{b['title']}**\n\n<small style='color: #cbd5e1;'>by {b['author']}</small>", unsafe_allow_html=True)
+
+                    pages_t = f"📖 {int(b['pages'])}p" if b.get("pages") else "📖 N/A"
+                    comm_t = f"★ {b['ratings_avg']}" if b.get("ratings_avg") else "★ N/A"
+                    st.caption(f"{pages_t} • {comm_t}")
+
+                    st.markdown(f"<div style='font-size: 11px; color: #93c5fd; font-style: italic; min-height: 38px; margin-bottom: 4px;'>💡 {b.get('pick_reason', '')}</div>", unsafe_allow_html=True)
+
                     st.markdown(
-                        """<div style="height: 165px; background: #23232c; border-radius: 8px; display: flex; align-items: center; justify-content: center; color: #888; font-size: 11px; margin-bottom: 8px;">No Cover</div>""",
+                        f"""<div style="margin: 4px 0 10px 0;">
+                            <a href="{ol_url}" target="_blank" style="display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 600; color: #60A5FA; text-decoration: none; padding: 3px 8px; background: rgba(59, 130, 246, 0.12); border: 1px solid rgba(59, 130, 246, 0.3); border-radius: 6px;">
+                                <span>📖</span> Read Synopsis ↗
+                            </a>
+                        </div>""",
                         unsafe_allow_html=True,
                     )
 
-                st.markdown(
-                    f"""<div style="background: #2563EB; color: #ffffff; font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 999px; display: inline-block; margin-bottom: 6px;">
-                        {b['taste_match']}% MATCH
-                    </div>""",
-                    unsafe_allow_html=True,
-                )
+                    if is_interested:
+                        st.button("✅ Saved!", key=f"btn_int_{idx}_{c_title[:10]}", disabled=True, use_container_width=True)
+                    else:
+                        if st.button("⭐ Interested!", key=f"btn_int_{idx}_{c_title[:10]}", type="secondary", use_container_width=True):
+                            log_recommendation_feedback(
+                                session_id=session_id,
+                                title=b["title"],
+                                author=b["author"],
+                                taste_match_pct=b.get("taste_match", 0),
+                                action="interested",
+                                ol_key=b.get("key"),
+                            )
+                            st.session_state["interested_titles"].add(c_title)
+                            st.toast(f"Saved '{b['title']}' to your Interested list! ⭐")
+                            st.rerun()
 
-                st.markdown(f"**{b['title']}**\n\n<small style='color: #cbd5e1;'>by {b['author']}</small>", unsafe_allow_html=True)
-
-                pages_t = f"📖 {int(b['pages'])}p" if b.get("pages") else "📖 N/A"
-                comm_t = f"★ {b['ratings_avg']}" if b.get("ratings_avg") else "★ N/A"
-                st.caption(f"{pages_t} • {comm_t}")
-
-                st.markdown(f"<div style='font-size: 11px; color: #93c5fd; font-style: italic; min-height: 40px; margin-bottom: 6px;'>💡 {b.get('pick_reason', '')}</div>", unsafe_allow_html=True)
-
-                st.markdown(f"<a href='{ol_url}' target='_blank' style='font-size: 11px; color: #60A5FA; text-decoration: none;'>📖 Open Library ↗</a>", unsafe_allow_html=True)
-
-                st.markdown("<div style='margin-top: 8px;'></div>", unsafe_allow_html=True)
-
-                if is_interested:
-                    st.button("✅ Saved!", key=f"btn_int_{idx}_{c_title[:10]}", disabled=True, use_container_width=True)
-                else:
-                    if st.button("⭐ Interested!", key=f"btn_int_{idx}_{c_title[:10]}", type="secondary", use_container_width=True):
+                    if st.button("I've Read This!", key=f"btn_read_{idx}_{c_title[:10]}", type="secondary", use_container_width=True):
                         log_recommendation_feedback(
                             session_id=session_id,
                             title=b["title"],
                             author=b["author"],
                             taste_match_pct=b.get("taste_match", 0),
-                            action="interested",
+                            action="already_read",
                             ol_key=b.get("key"),
                         )
-                        st.session_state["interested_titles"].add(c_title)
-                        st.toast(f"Saved '{b['title']}' to your Interested list! ⭐")
-                        st.rerun()
+                        seen = st.session_state.get("seen_recommendation_titles", set())
+                        seen.add(c_title)
+                        st.session_state["seen_recommendation_titles"] = seen
 
-                if st.button("I've Read This!", key=f"btn_read_{idx}_{c_title[:10]}", type="secondary", use_container_width=True):
-                    log_recommendation_feedback(
-                        session_id=session_id,
-                        title=b["title"],
-                        author=b["author"],
-                        taste_match_pct=b.get("taste_match", 0),
-                        action="already_read",
-                        ol_key=b.get("key"),
-                    )
-                    seen = st.session_state.get("seen_recommendation_titles", set())
-                    seen.add(c_title)
-                    st.session_state["seen_recommendation_titles"] = seen
-
-                    scored_pool = st.session_state.get("scored_candidates", [])
-                    all_excluded = seen.union({clean_book_title(p["title"]) for p in st.session_state["recommendations"]})
-                    replacements = select_diverse_recommendations(
-                        scored_pool,
-                        exclude_titles=all_excluded,
-                        max_picks=1,
-                        reserve_nonfiction=False,
-                    )
-                    if replacements:
-                        new_pick = replacements[0]
-                        st.session_state["recommendations"][idx] = new_pick
-                        st.session_state["seen_recommendation_titles"].add(clean_book_title(new_pick["title"]))
-                        log_recommendation_feedback(
-                            session_id=session_id,
-                            title=new_pick["title"],
-                            author=new_pick["author"],
-                            taste_match_pct=new_pick.get("taste_match", 0),
-                            action="shown",
-                            ol_key=new_pick.get("key"),
+                        scored_pool = st.session_state.get("scored_candidates", [])
+                        all_excluded = seen.union({clean_book_title(p["title"]) for p in st.session_state["recommendations"]})
+                        replacements = select_diverse_recommendations(
+                            scored_pool,
+                            exclude_titles=all_excluded,
+                            max_picks=1,
+                            reserve_nonfiction=False,
                         )
-                        st.toast(f"Replaced with '{new_pick['title']}'! 📚")
-                    else:
-                        st.session_state["recommendations"].pop(idx)
-                        st.toast(f"Marked '{b['title']}' as read!")
-                    st.rerun()
+                        if replacements:
+                            new_pick = replacements[0]
+                            st.session_state["recommendations"][idx] = new_pick
+                            st.session_state["seen_recommendation_titles"].add(clean_book_title(new_pick["title"]))
+                            log_recommendation_feedback(
+                                session_id=session_id,
+                                title=new_pick["title"],
+                                author=new_pick["author"],
+                                taste_match_pct=new_pick.get("taste_match", 0),
+                                action="shown",
+                                ol_key=new_pick.get("key"),
+                            )
+                            st.toast(f"Replaced with '{new_pick['title']}'! 📚")
+                        else:
+                            st.session_state["recommendations"].pop(idx)
+                            st.toast(f"Marked '{b['title']}' as read!")
+                        st.rerun()
 
 
 # ── Page config ──────────────────────────────────────────────────────────────
