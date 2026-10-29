@@ -1380,53 +1380,109 @@ ENG_WORDS = {
 }
 
 
+FORBIDDEN_CHARS = set(
+    "¿¡ßñÑ"
+    "ōūāīēŌŪĀĪĒ"  # Macrons (Japanese Hepburn romanization, etc.)
+    "łŁżźćńśąę"   # Polish
+    "čšžřňďť"     # Czech/Slovak
+    "őűů"         # Hungarian/Czech
+    "øØæÆåÅ"      # Nordic
+    "äöüÄÖÜ"      # German umlauts
+    "ãõÃÕ"        # Portuguese
+    "ğĞıİşŞ"      # Turkish
+    "ășțĂȘȚ"      # Romanian
+    "àâîôûÀÂÎÔÛ"  # French circumflex/grave on vowels
+    "áíúÁÍÚ"      # Spanish/Portuguese acutes
+)
+
+NON_LATIN_RANGES = [
+    (0x0400, 0x04FF),  # Cyrillic
+    (0x0500, 0x052F),  # Cyrillic Supplementary
+    (0x0600, 0x06FF),  # Arabic
+    (0x0590, 0x05FF),  # Hebrew
+    (0x4E00, 0x9FFF),  # CJK Unified Ideographs
+    (0x3400, 0x4DBF),  # CJK Extension A
+    (0x3040, 0x309F),  # Hiragana
+    (0x30A0, 0x30FF),  # Katakana
+    (0xAC00, 0xD7AF),  # Hangul Syllables
+    (0x1100, 0x11FF),  # Hangul Jamo
+    (0x0900, 0x097F),  # Devanagari
+    (0x0E00, 0x0E7F),  # Thai
+    (0x0370, 0x03FF),  # Greek
+]
+
+JAPANESE_ROMANIZED_TOKENS = {
+    "kun", "chan", "san", "sama", "sensei", "senpai", "joshikai", "monogatari",
+    "shoujo", "shonen", "manga", "otaku", "isekai", "akkochan"
+}
+
+
 def is_likely_english_title(title: str, doc_languages: Optional[List] = None) -> bool:
-    if not title:
+    if not title or not isinstance(title, str):
         return False
+    raw_title = title.strip()
+    if not raw_title:
+        return False
+
+    # 1. Open Library language metadata check
     if doc_languages:
-        langs = [str(l).lower() for l in doc_languages]
-        if "eng" not in langs and not any("en" in l for l in langs):
+        langs = [str(l).lower() for l in doc_languages] if isinstance(doc_languages, list) else [str(doc_languages).lower()]
+        has_eng = any(l in {"eng", "en", "english"} for l in langs)
+        has_foreign = any(l in {
+            "spa", "ita", "fre", "fra", "ger", "deu", "rus", "chi", "zho",
+            "jpn", "kor", "por", "pol", "cze", "ces", "hun", "dan", "swe",
+            "nor", "fin", "tur", "dut", "nld", "gre", "ell", "heb", "ara", "hin"
+        } for l in langs)
+        if has_foreign and not has_eng:
+            return False
+        if langs and not has_eng and all(len(l) == 3 for l in langs):
             return False
 
-    for ch in title:
+    # 2. Check for non-Latin scripts (CJK, Arabic, Cyrillic, Hangul, Kana, etc.)
+    for ch in raw_title:
         cp = ord(ch)
-        if (
-            (0x0400 <= cp <= 0x04FF)  # Cyrillic
-            or (0x0600 <= cp <= 0x06FF)  # Arabic
-            or (0x4E00 <= cp <= 0x9FFF)  # CJK
-            or (0x3040 <= cp <= 0x30FF)  # Kana
-            or (0xAC00 <= cp <= 0xD7AF)  # Hangul
-            or (0x0900 <= cp <= 0x097F)  # Devanagari
-            or (0x0370 <= cp <= 0x03FF)  # Greek
-        ):
+        for r_start, r_end in NON_LATIN_RANGES:
+            if r_start <= cp <= r_end:
+                return False
+
+    # 3. Check for non-English letters (macrons, Polish letters, umlauts, Spanish/French diacritics)
+    for ch in raw_title:
+        if ch in FORBIDDEN_CHARS:
             return False
 
-    if any(c in title for c in ["¿", "¡", "ß", "ñ", "Ñ"]):
+    # 4. Token analysis
+    tokens = [re.sub(r"[^\w]", "", w).lower() for w in re.split(r"[\s\-_/]+", raw_title)]
+    tokens = [t for t in tokens if t]
+    if not tokens:
         return False
 
-    words = [re.sub(r"[^\w]", "", w).lower() for w in title.split()]
-    words = [w for w in words if w]
-    if not words:
+    # 5. Check for Japanese romanized patterns
+    for t in tokens:
+        if t in JAPANESE_ROMANIZED_TOKENS:
+            return False
+    if any(t.endswith("kun") and len(t) > 3 for t in tokens):
+        return False
+    if any(t.endswith("chan") and len(t) > 4 for t in tokens):
         return False
 
-    sp_count = sum(1 for w in words if w in SPANISH_WORDS)
-    it_count = sum(1 for w in words if w in ITALIAN_WORDS)
-    fr_count = sum(1 for w in words if w in FRENCH_WORDS)
-    de_count = sum(1 for w in words if w in GERMAN_WORDS)
-    eng_count = sum(1 for w in words if w in ENG_WORDS)
+    # 6. Check for foreign stop words
+    sp_count = sum(1 for w in tokens if w in SPANISH_WORDS)
+    it_count = sum(1 for w in tokens if w in ITALIAN_WORDS)
+    fr_count = sum(1 for w in tokens if w in FRENCH_WORDS)
+    de_count = sum(1 for w in tokens if w in GERMAN_WORDS)
+    eng_count = sum(1 for w in tokens if w in ENG_WORDS)
 
-    if len(words) >= 2:
-        first = words[0]
-        if first in {"el", "los", "del"} and eng_count == 0:
-            return False
-        if first in {"il", "lo", "gli"} and eng_count == 0:
-            return False
-        if first in {"le", "les", "des", "du"} and eng_count == 0:
-            return False
-        if first in {"der", "die", "das", "dem", "den"} and eng_count == 0:
-            return False
-        if first == "la" and (sp_count >= 1 or it_count >= 1 or fr_count >= 1) and eng_count == 0:
-            return False
+    first = tokens[0]
+    if first in {"el", "los", "del", "las"} and eng_count == 0:
+        return False
+    if first in {"il", "lo", "gli"} and eng_count == 0:
+        return False
+    if first in {"le", "les", "des", "du"} and eng_count == 0:
+        return False
+    if first in {"der", "die", "das", "dem", "den"} and eng_count == 0:
+        return False
+    if first == "la" and (sp_count >= 1 or it_count >= 1 or fr_count >= 1) and eng_count == 0:
+        return False
 
     if (sp_count >= 2 or it_count >= 2 or fr_count >= 2 or de_count >= 2) and eng_count == 0:
         return False
@@ -1509,7 +1565,7 @@ def fetch_scored_candidates(catalog_df: pd.DataFrame) -> (List[Dict[str, object]
                     c_title = clean_book_title(t)
                     if not c_title or c_title in seen_titles:
                         continue
-                    if not is_likely_english_title(c_title, doc.get("language")):
+                    if not is_likely_english_title(t, doc.get("language")):
                         continue
                     if not reads_children and is_children_book(doc.get("subject", [])):
                         continue
@@ -1535,7 +1591,7 @@ def fetch_scored_candidates(catalog_df: pd.DataFrame) -> (List[Dict[str, object]
                     c_title = clean_book_title(t)
                     if not c_title or c_title in seen_titles:
                         continue
-                    if not is_likely_english_title(c_title, doc.get("language")):
+                    if not is_likely_english_title(t, doc.get("language")):
                         continue
                     if not reads_children and is_children_book(doc.get("subject", [])):
                         continue
@@ -1561,7 +1617,7 @@ def fetch_scored_candidates(catalog_df: pd.DataFrame) -> (List[Dict[str, object]
                     c_title = clean_book_title(t)
                     if not c_title or c_title in seen_titles:
                         continue
-                    if not is_likely_english_title(c_title, doc.get("language")):
+                    if not is_likely_english_title(t, doc.get("language")):
                         continue
                     if not reads_children and is_children_book(doc.get("subject", [])):
                         continue
