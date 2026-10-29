@@ -1540,8 +1540,19 @@ def fetch_scored_candidates(catalog_df: pd.DataFrame) -> (List[Dict[str, object]
         p25, p75 = 300.0, 500.0
 
     read_titles = set(clean_book_title(t) for t in catalog_df["Title"].dropna())
+    read_keys = set(str(k).strip() for k in catalog_df["ol_key"].dropna().unique()) if "ol_key" in catalog_df.columns else set()
+    
+    # Map read authors to clean titles for cross-edition matching
+    read_author_to_titles = {}
+    for _, r in catalog_df.iterrows():
+        a = str(r.get("Author") or "").strip().lower()
+        t_clean = clean_book_title(str(r.get("Title") or ""))
+        if a and t_clean:
+            read_author_to_titles.setdefault(a, set()).add(t_clean)
+
     candidates = []
     seen_titles = set(read_titles)
+    seen_keys = set(read_keys)
     headers = {"User-Agent": "NextChapterBookApp/1.0 (educational research)"}
 
     generic_tags = {"fiction", "general", "fiction / general", "nonfiction"}
@@ -1554,7 +1565,7 @@ def fetch_scored_candidates(catalog_df: pd.DataFrame) -> (List[Dict[str, object]
         params = {
             "q": f'subject:"{subj}" language:eng',
             "sort": "readinglog",
-            "limit": 15,
+            "limit": 20,
             "fields": "key,title,author_name,number_of_pages_median,ratings_average,ratings_count,subject,cover_i,language",
         }
         try:
@@ -1563,13 +1574,21 @@ def fetch_scored_candidates(catalog_df: pd.DataFrame) -> (List[Dict[str, object]
                 for doc in resp.json().get("docs", []):
                     t = doc.get("title")
                     c_title = clean_book_title(t)
-                    if not c_title or c_title in seen_titles:
+                    doc_key = str(doc.get("key") or "").strip()
+                    if not c_title or c_title in seen_titles or (doc_key and doc_key in seen_keys):
                         continue
                     if not is_likely_english_title(t, doc.get("language")):
                         continue
                     if not reads_children and is_children_book(doc.get("subject", [])):
                         continue
+                    auth_list = doc.get("author_name") or []
+                    cand_auth = auth_list[0].strip().lower() if auth_list else ""
+                    if cand_auth in read_author_to_titles:
+                        if any(c_title in r_t or r_t in c_title for r_t in read_author_to_titles[cand_auth]):
+                            continue
                     seen_titles.add(c_title)
+                    if doc_key:
+                        seen_keys.add(doc_key)
                     doc["is_nonfiction"] = False
                     candidates.append(doc)
         except Exception:
@@ -1580,7 +1599,7 @@ def fetch_scored_candidates(catalog_df: pd.DataFrame) -> (List[Dict[str, object]
         params = {
             "q": f'author:"{auth}" language:eng',
             "sort": "readinglog",
-            "limit": 8,
+            "limit": 12,
             "fields": "key,title,author_name,number_of_pages_median,ratings_average,ratings_count,subject,cover_i,language",
         }
         try:
@@ -1589,13 +1608,21 @@ def fetch_scored_candidates(catalog_df: pd.DataFrame) -> (List[Dict[str, object]
                 for doc in resp.json().get("docs", []):
                     t = doc.get("title")
                     c_title = clean_book_title(t)
-                    if not c_title or c_title in seen_titles:
+                    doc_key = str(doc.get("key") or "").strip()
+                    if not c_title or c_title in seen_titles or (doc_key and doc_key in seen_keys):
                         continue
                     if not is_likely_english_title(t, doc.get("language")):
                         continue
                     if not reads_children and is_children_book(doc.get("subject", [])):
                         continue
+                    auth_list = doc.get("author_name") or []
+                    cand_auth = auth_list[0].strip().lower() if auth_list else ""
+                    if cand_auth in read_author_to_titles:
+                        if any(c_title in r_t or r_t in c_title for r_t in read_author_to_titles[cand_auth]):
+                            continue
                     seen_titles.add(c_title)
+                    if doc_key:
+                        seen_keys.add(doc_key)
                     doc["is_nonfiction"] = False
                     candidates.append(doc)
         except Exception:
@@ -1606,7 +1633,7 @@ def fetch_scored_candidates(catalog_df: pd.DataFrame) -> (List[Dict[str, object]
         params = {
             "q": "subject:memoir OR subject:history language:eng",
             "sort": "readinglog",
-            "limit": 10,
+            "limit": 12,
             "fields": "key,title,author_name,number_of_pages_median,ratings_average,ratings_count,subject,cover_i,language",
         }
         try:
@@ -1615,13 +1642,21 @@ def fetch_scored_candidates(catalog_df: pd.DataFrame) -> (List[Dict[str, object]
                 for doc in resp.json().get("docs", []):
                     t = doc.get("title")
                     c_title = clean_book_title(t)
-                    if not c_title or c_title in seen_titles:
+                    doc_key = str(doc.get("key") or "").strip()
+                    if not c_title or c_title in seen_titles or (doc_key and doc_key in seen_keys):
                         continue
                     if not is_likely_english_title(t, doc.get("language")):
                         continue
                     if not reads_children and is_children_book(doc.get("subject", [])):
                         continue
+                    auth_list = doc.get("author_name") or []
+                    cand_auth = auth_list[0].strip().lower() if auth_list else ""
+                    if cand_auth in read_author_to_titles:
+                        if any(c_title in r_t or r_t in c_title for r_t in read_author_to_titles[cand_auth]):
+                            continue
                     seen_titles.add(c_title)
+                    if doc_key:
+                        seen_keys.add(doc_key)
                     doc["is_nonfiction"] = True
                     candidates.append(doc)
         except Exception:
