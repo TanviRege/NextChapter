@@ -1589,10 +1589,10 @@ def select_diverse_recommendations(
             sec_sub = f"Captivating books matching your passion for {top_s_title}"
             reason = f"High genre match based on your top {top_s_title} reads"
         elif cand.get("length_fit", 0.0) >= 0.9 and cand.get("pages"):
-            sec_title = "In your reading sweet spot"
+            sec_title = "Since you typically read books of this length"
             sec_icon = "🎯"
-            sec_sub = "Tailored to your ideal pacing and book length"
-            reason = f"Pacing match in your sweet spot ({int(cand['pages'])}p)"
+            sec_sub = "Tailored to your ideal pacing and typical book length"
+            reason = f"Matches your typical book length ({int(cand['pages'])}p)"
         else:
             sec_title = "Top overall matches for your reading profile"
             sec_icon = "✨"
@@ -1652,7 +1652,7 @@ def select_diverse_recommendations(
 
 
 def clear_recommendations_state():
-    for k in ("recommendations", "seen_recommendation_titles", "refresh_count", "scored_candidates", "has_nonfiction_anchor", "interested_titles"):
+    for k in ("recommendations", "seen_recommendation_titles", "refresh_count", "scored_candidates", "has_nonfiction_anchor", "interested_titles", "read_titles"):
         st.session_state.pop(k, None)
 
 
@@ -1717,6 +1717,9 @@ def render_recommendations_section(catalog_df: pd.DataFrame):
     if "interested_titles" not in st.session_state:
         st.session_state["interested_titles"] = set()
     interested_titles = st.session_state["interested_titles"]
+    if "read_titles" not in st.session_state:
+        st.session_state["read_titles"] = set()
+    read_titles = st.session_state["read_titles"]
     session_id = st.session_state.get("session_id", "default")
 
     refresh_count = st.session_state.get("refresh_count", 0)
@@ -1792,6 +1795,7 @@ def render_recommendations_section(catalog_df: pd.DataFrame):
         for c_i, (idx, b) in enumerate(items):
             c_title = clean_book_title(b["title"])
             is_interested = c_title in interested_titles
+            is_read = c_title in read_titles
             ol_url = f"https://openlibrary.org{b['key']}" if b.get("key") else f"https://openlibrary.org/search?q={urllib.parse.quote(b['title'])}"
 
             with cols[c_i]:
@@ -1834,7 +1838,7 @@ def render_recommendations_section(catalog_df: pd.DataFrame):
                     )
 
                     if is_interested:
-                        st.button("✅ Saved!", key=f"btn_int_{idx}_{c_title[:10]}", disabled=True, use_container_width=True)
+                        st.button("⭐ Interested", key=f"btn_int_{idx}_{c_title[:10]}", disabled=True, use_container_width=True)
                     else:
                         if st.button("⭐ Interested!", key=f"btn_int_{idx}_{c_title[:10]}", type="secondary", use_container_width=True):
                             log_recommendation_feedback(
@@ -1846,47 +1850,22 @@ def render_recommendations_section(catalog_df: pd.DataFrame):
                                 ol_key=b.get("key"),
                             )
                             st.session_state["interested_titles"].add(c_title)
-                            st.toast(f"Saved '{b['title']}' to your Interested list! ⭐")
                             st.rerun()
 
-                    if st.button("I've Read This!", key=f"btn_read_{idx}_{c_title[:10]}", type="secondary", use_container_width=True):
-                        log_recommendation_feedback(
-                            session_id=session_id,
-                            title=b["title"],
-                            author=b["author"],
-                            taste_match_pct=b.get("taste_match", 0),
-                            action="already_read",
-                            ol_key=b.get("key"),
-                        )
-                        seen = st.session_state.get("seen_recommendation_titles", set())
-                        seen.add(c_title)
-                        st.session_state["seen_recommendation_titles"] = seen
-
-                        scored_pool = st.session_state.get("scored_candidates", [])
-                        all_excluded = seen.union({clean_book_title(p["title"]) for p in st.session_state["recommendations"]})
-                        replacements = select_diverse_recommendations(
-                            scored_pool,
-                            exclude_titles=all_excluded,
-                            max_picks=1,
-                            reserve_nonfiction=False,
-                        )
-                        if replacements:
-                            new_pick = replacements[0]
-                            st.session_state["recommendations"][idx] = new_pick
-                            st.session_state["seen_recommendation_titles"].add(clean_book_title(new_pick["title"]))
+                    if is_read:
+                        st.button("✓ I've Read This", key=f"btn_read_{idx}_{c_title[:10]}", disabled=True, use_container_width=True)
+                    else:
+                        if st.button("I've Read This!", key=f"btn_read_{idx}_{c_title[:10]}", type="secondary", use_container_width=True):
                             log_recommendation_feedback(
                                 session_id=session_id,
-                                title=new_pick["title"],
-                                author=new_pick["author"],
-                                taste_match_pct=new_pick.get("taste_match", 0),
-                                action="shown",
-                                ol_key=new_pick.get("key"),
+                                title=b["title"],
+                                author=b["author"],
+                                taste_match_pct=b.get("taste_match", 0),
+                                action="already_read",
+                                ol_key=b.get("key"),
                             )
-                            st.toast(f"Replaced with '{new_pick['title']}'! 📚")
-                        else:
-                            st.session_state["recommendations"].pop(idx)
-                            st.toast(f"Marked '{b['title']}' as read!")
-                        st.rerun()
+                            st.session_state["read_titles"].add(c_title)
+                            st.rerun()
 
 
 # ── Page config ──────────────────────────────────────────────────────────────
@@ -1992,6 +1971,8 @@ if "session_id" not in st.session_state:
     st.session_state["session_id"] = str(uuid.uuid4())[:8]
 if "interested_titles" not in st.session_state:
     st.session_state["interested_titles"] = set()
+if "read_titles" not in st.session_state:
+    st.session_state["read_titles"] = set()
 
 st.markdown(
     """
