@@ -1698,7 +1698,6 @@ def fetch_scored_candidates(catalog_df: pd.DataFrame) -> (List[Dict[str, object]
     seen_titles = set(read_titles)
     seen_keys = set(read_keys)
     headers = {"User-Agent": "NextChapterBookApp/1.0 (educational research)"}
-    era_query = "publish_year:[1970 TO *]" if is_contemporary_reader else ""
 
     def add_valid_candidate(doc: dict, is_nonfiction: bool = False) -> bool:
         t = doc.get("title")
@@ -1710,9 +1709,6 @@ def fetch_scored_candidates(catalog_df: pd.DataFrame) -> (List[Dict[str, object]
         if not allowed:
             return False
         if not reads_children and is_children_book(doc.get("subject", [])):
-            return False
-        cand_year = doc.get("first_publish_year")
-        if is_contemporary_reader and cand_year and isinstance(cand_year, (int, float)) and cand_year < 1960:
             return False
         auth_list = doc.get("author_name") or []
         cand_auth = auth_list[0].strip().lower() if auth_list else ""
@@ -1735,7 +1731,7 @@ def fetch_scored_candidates(catalog_df: pd.DataFrame) -> (List[Dict[str, object]
     # Primary Pass 1: Active top subjects
     for subj in active_subjects:
         url = "https://openlibrary.org/search.json"
-        query_str = f'subject:"{subj}" {lang_query} {era_query}'.strip()
+        query_str = f'subject:"{subj}" {lang_query}'.strip()
         params = {
             "q": query_str,
             "sort": "readinglog",
@@ -1754,7 +1750,7 @@ def fetch_scored_candidates(catalog_df: pd.DataFrame) -> (List[Dict[str, object]
     anchor_author_list = list(affinity_authors)
     for auth in anchor_author_list[:3]:
         url = "https://openlibrary.org/search.json"
-        query_str = f'author:"{auth}" {lang_query} {era_query}'.strip()
+        query_str = f'author:"{auth}" {lang_query}'.strip()
         params = {
             "q": query_str,
             "sort": "readinglog",
@@ -1772,7 +1768,7 @@ def fetch_scored_candidates(catalog_df: pd.DataFrame) -> (List[Dict[str, object]
     # Primary Pass 3: Nonfiction if anchor present
     if has_nonfiction_anchor:
         url = "https://openlibrary.org/search.json"
-        query_str = f"subject:memoir OR subject:history {lang_query} {era_query}".strip()
+        query_str = f"subject:memoir OR subject:history {lang_query}".strip()
         params = {
             "q": query_str,
             "sort": "readinglog",
@@ -1788,7 +1784,7 @@ def fetch_scored_candidates(catalog_df: pd.DataFrame) -> (List[Dict[str, object]
             pass
 
     # ── Auto-Repopulation / Dynamic Backfill ──────────────────────────────────
-    # If edge case filters (language, era, juvenile, duplicates) eliminated too many candidates,
+    # If edge case filters (language, juvenile, duplicates) eliminated too many candidates,
     # automatically backfill with additional favorite authors, secondary subjects, and curated fallbacks.
     TARGET_MIN_CANDIDATES = 25
     if len(candidates) < TARGET_MIN_CANDIDATES:
@@ -1797,7 +1793,7 @@ def fetch_scored_candidates(catalog_df: pd.DataFrame) -> (List[Dict[str, object]
             if len(candidates) >= TARGET_MIN_CANDIDATES:
                 break
             url = "https://openlibrary.org/search.json"
-            query_str = f'author:"{auth}" {lang_query} {era_query}'.strip()
+            query_str = f'author:"{auth}" {lang_query}'.strip()
             params = {
                 "q": query_str,
                 "sort": "readinglog",
@@ -1818,7 +1814,7 @@ def fetch_scored_candidates(catalog_df: pd.DataFrame) -> (List[Dict[str, object]
             if len(candidates) >= TARGET_MIN_CANDIDATES:
                 break
             url = "https://openlibrary.org/search.json"
-            query_str = f'subject:"{subj}" {lang_query} {era_query}'.strip()
+            query_str = f'subject:"{subj}" {lang_query}'.strip()
             params = {
                 "q": query_str,
                 "sort": "readinglog",
@@ -1881,17 +1877,11 @@ def fetch_scored_candidates(catalog_df: pd.DataFrame) -> (List[Dict[str, object]
 
         subject_fit = max(0.0, min(1.0, (raw_subject_scores[i] - min_raw) / raw_spread))
         author_bonus = 1.0 if any(a.lower() in affinity_authors for a in authors) else 0.0
-        era_fit = calculate_era_fit(cand_year, target_era, era_spread)
         community = min(1.0, float(ratings_avg) / 5.0) if ratings_cnt >= 100 else 0.0
         length_fit = calculate_length_fit(pages, p25, p75)
 
-        score = (
-            (0.45 * subject_fit) +
-            (0.20 * author_bonus) +
-            (0.15 * era_fit) +
-            (0.10 * community) +
-            (0.10 * length_fit)
-        )
+        # Baseline 4-Pillar Heuristic Formula
+        score = (0.55 * subject_fit) + (0.20 * author_bonus) + (0.15 * community) + (0.10 * length_fit)
 
         scored_candidates.append({
             "key": doc.get("key"),
@@ -1907,7 +1897,6 @@ def fetch_scored_candidates(catalog_df: pd.DataFrame) -> (List[Dict[str, object]
             "is_translation": doc.get("is_translation", False),
             "subject_fit": subject_fit,
             "author_bonus": author_bonus,
-            "era_fit": era_fit,
             "community": community,
             "length_fit": length_fit,
             "score": score,
