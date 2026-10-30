@@ -12,7 +12,7 @@ import uuid
 import threading
 import time
 from PIL import Image, ImageDraw, ImageFont
-from typing import Dict, Optional, Union, List
+from typing import Dict, Optional, Union, List, Set
 
 DB_NAME = "catalog.db"
 TABLE_NAME = "user_catalog"
@@ -1417,77 +1417,183 @@ JAPANESE_ROMANIZED_TOKENS = {
 }
 
 
-def is_likely_english_title(title: str, doc_languages: Optional[List] = None) -> bool:
+def detect_catalog_languages(catalog_df: pd.DataFrame) -> (Set[str], bool):
+    """
+    Detects user's reading languages from catalog titles and metadata.
+    Returns:
+        (detected_languages, is_all_english)
+        e.g. ({'eng'}, True) or ({'eng', 'spa'}, False)
+    """
+    if catalog_df is None or catalog_df.empty:
+        return {"eng"}, True
+
+    detected_langs = set()
+    
+    # 1. Check explicit language column if present
+    if "language" in catalog_df.columns:
+        for val in catalog_df["language"].dropna():
+            val_str = str(val).lower()
+            for code in ["eng", "spa", "fre", "fra", "ger", "deu", "ita", "por", "pol", "rus", "jpn"]:
+                if code in val_str:
+                    canonical = "fre" if code == "fra" else ("ger" if code == "deu" else code)
+                    detected_langs.add(canonical)
+
+    # 2. Linguistic analysis of catalog titles
+    titles = catalog_df["Title"].dropna().tolist() if "Title" in catalog_df.columns else []
+    
+    has_spanish, has_french, has_german, has_italian, has_english = False, False, False, False, False
+
+    for t in titles:
+        raw = str(t).strip()
+        words = [re.sub(r"[^\w]", "", w).lower() for w in raw.split()]
+        words = [w for w in words if w]
+        if not words:
+            continue
+
+        sp_hits = sum(1 for w in words if w in SPANISH_WORDS) or any(c in raw for c in ["¿", "¡", "ñ", "Ñ"])
+        fr_hits = sum(1 for w in words if w in FRENCH_WORDS) or any(w in words for w in ["yeux", "etranger", "prince"])
+        de_hits = sum(1 for w in words if w in GERMAN_WORDS) or any(c in raw for c in ["ß", "ä", "ö", "ü"])
+        it_hits = sum(1 for w in words if w in ITALIAN_WORDS)
+        eng_hits = sum(1 for w in words if w in ENG_WORDS)
+
+        if sp_hits >= 2 or (len(words) >= 2 and words[0] in {"el", "los", "del"} and eng_hits == 0) or any(c in raw for c in ["¿", "¡", "ñ", "Ñ"]):
+            has_spanish = True
+        elif fr_hits >= 2 or (len(words) >= 2 and words[0] in {"les", "des"} and eng_hits == 0):
+            has_french = True
+        elif de_hits >= 2 or (len(words) >= 2 and words[0] in {"der", "die", "das"} and eng_hits == 0):
+            has_german = True
+        elif it_hits >= 2 or (len(words) >= 2 and words[0] in {"il", "lo", "gli"} and eng_hits == 0):
+            has_italian = True
+        else:
+            has_english = True
+
+    if has_spanish:
+        detected_langs.add("spa")
+    if has_french:
+        detected_langs.add("fre")
+    if has_german:
+        detected_langs.add("ger")
+    if has_italian:
+        detected_langs.add("ita")
+    if has_english or not detected_langs:
+        detected_langs.add("eng")
+
+    is_all_english = (detected_langs == {"eng"})
+    return detected_langs, is_all_english
+
+
+def is_allowed_language_title(title: str, doc_languages: Optional[List] = None, allowed_languages: Optional[Set[str]] = None) -> bool:
     if not title or not isinstance(title, str):
         return False
     raw_title = title.strip()
     if not raw_title:
         return False
 
-    # 1. Open Library language metadata check
-    if doc_languages:
-        langs = [str(l).lower() for l in doc_languages] if isinstance(doc_languages, list) else [str(doc_languages).lower()]
-        has_eng = any(l in {"eng", "en", "english"} for l in langs)
-        has_foreign = any(l in {
-            "spa", "ita", "fre", "fra", "ger", "deu", "rus", "chi", "zho",
-            "jpn", "kor", "por", "pol", "cze", "ces", "hun", "dan", "swe",
-            "nor", "fin", "tur", "dut", "nld", "gre", "ell", "heb", "ara", "hin"
-        } for l in langs)
-        if has_foreign and not has_eng:
-            return False
-        if langs and not has_eng and all(len(l) == 3 for l in langs):
+    if allowed_languages is None or allowed_languages == {"eng"}:
+        # STRICT ENGLISH HARD FILTER (If all catalog books are English)
+        if doc_languages:
+            langs = [str(l).lower() for l in doc_languages] if isinstance(doc_languages, list) else [str(doc_languages).lower()]
+            has_eng = any(l in {"eng", "en", "english"} for l in langs)
+            has_foreign = any(l in {
+                "spa", "ita", "fre", "fra", "ger", "deu", "rus", "chi", "zho",
+                "jpn", "kor", "por", "pol", "cze", "ces", "hun", "dan", "swe",
+                "nor", "fin", "tur", "dut", "nld", "gre", "ell", "heb", "ara", "hin"
+            } for l in langs)
+            if has_foreign and not has_eng:
+                return False
+            if langs and not has_eng and all(len(l) == 3 for l in langs):
+                return False
+
+        for ch in raw_title:
+            cp = ord(ch)
+            for r_start, r_end in NON_LATIN_RANGES:
+                if r_start <= cp <= r_end:
+                    return False
+            if ch in FORBIDDEN_CHARS:
+                return False
+
+        tokens = [re.sub(r"[^\w]", "", w).lower() for w in re.split(r"[\s\-_/]+", raw_title)]
+        tokens = [t for t in tokens if t]
+        if not tokens:
             return False
 
-    # 2. Check for non-Latin scripts (CJK, Arabic, Cyrillic, Hangul, Kana, etc.)
+        for t in tokens:
+            if t in JAPANESE_ROMANIZED_TOKENS:
+                return False
+        if any(t.endswith("kun") and len(t) > 3 for t in tokens):
+            return False
+        if any(t.endswith("chan") and len(t) > 4 for t in tokens):
+            return False
+
+        sp_count = sum(1 for w in tokens if w in SPANISH_WORDS)
+        it_count = sum(1 for w in tokens if w in ITALIAN_WORDS)
+        fr_count = sum(1 for w in tokens if w in FRENCH_WORDS)
+        de_count = sum(1 for w in tokens if w in GERMAN_WORDS)
+        eng_count = sum(1 for w in tokens if w in ENG_WORDS)
+
+        first = tokens[0]
+        if first in {"el", "los", "del", "las"} and eng_count == 0:
+            return False
+        if first in {"il", "lo", "gli"} and eng_count == 0:
+            return False
+        if first in {"le", "les", "des", "du"} and eng_count == 0:
+            return False
+        if first in {"der", "die", "das", "dem", "den"} and eng_count == 0:
+            return False
+        if first == "la" and (sp_count >= 1 or it_count >= 1 or fr_count >= 1) and eng_count == 0:
+            return False
+
+        if (sp_count >= 2 or it_count >= 2 or fr_count >= 2 or de_count >= 2) and eng_count == 0:
+            return False
+
+        return True
+
+    # DYNAMIC MULTI-LANGUAGE FILTER (When catalog contains multiple languages)
+    # 1. Non-Latin scripts check
     for ch in raw_title:
         cp = ord(ch)
         for r_start, r_end in NON_LATIN_RANGES:
             if r_start <= cp <= r_end:
                 return False
 
-    # 3. Check for non-English letters (macrons, Polish letters, umlauts, Spanish/French diacritics)
-    for ch in raw_title:
-        if ch in FORBIDDEN_CHARS:
+    # 2. Check metadata match against user's detected reading languages
+    if doc_languages:
+        langs = [str(l).lower() for l in doc_languages] if isinstance(doc_languages, list) else [str(doc_languages).lower()]
+        matches_allowed = any(
+            (al == "eng" and any(l in {"eng", "en", "english"} for l in langs))
+            or (al == "spa" and any(l in {"spa", "es", "spanish"} for l in langs))
+            or (al == "fre" and any(l in {"fre", "fra", "fr", "french"} for l in langs))
+            or (al == "ger" and any(l in {"ger", "deu", "de", "german"} for l in langs))
+            or (al == "ita" and any(l in {"ita", "it", "italian"} for l in langs))
+            for al in allowed_languages
+        )
+        if matches_allowed:
+            return True
+        if langs and all(len(l) == 3 for l in langs):
             return False
 
-    # 4. Token analysis
+    # 3. Token analysis
     tokens = [re.sub(r"[^\w]", "", w).lower() for w in re.split(r"[\s\-_/]+", raw_title)]
     tokens = [t for t in tokens if t]
     if not tokens:
         return False
 
-    # 5. Check for Japanese romanized patterns
-    for t in tokens:
-        if t in JAPANESE_ROMANIZED_TOKENS:
+    if "jpn" not in allowed_languages:
+        if any(t in JAPANESE_ROMANIZED_TOKENS for t in tokens):
             return False
-    if any(t.endswith("kun") and len(t) > 3 for t in tokens):
-        return False
-    if any(t.endswith("chan") and len(t) > 4 for t in tokens):
-        return False
+        if any(t.endswith("kun") and len(t) > 3 for t in tokens):
+            return False
 
-    # 6. Check for foreign stop words
-    sp_count = sum(1 for w in tokens if w in SPANISH_WORDS)
-    it_count = sum(1 for w in tokens if w in ITALIAN_WORDS)
-    fr_count = sum(1 for w in tokens if w in FRENCH_WORDS)
-    de_count = sum(1 for w in tokens if w in GERMAN_WORDS)
-    eng_count = sum(1 for w in tokens if w in ENG_WORDS)
-
-    first = tokens[0]
-    if first in {"el", "los", "del", "las"} and eng_count == 0:
-        return False
-    if first in {"il", "lo", "gli"} and eng_count == 0:
-        return False
-    if first in {"le", "les", "des", "du"} and eng_count == 0:
-        return False
-    if first in {"der", "die", "das", "dem", "den"} and eng_count == 0:
-        return False
-    if first == "la" and (sp_count >= 1 or it_count >= 1 or fr_count >= 1) and eng_count == 0:
-        return False
-
-    if (sp_count >= 2 or it_count >= 2 or fr_count >= 2 or de_count >= 2) and eng_count == 0:
-        return False
+    if "pol" not in allowed_languages:
+        if any(c in raw_title for c in "łŁżźćńśąę"):
+            return False
 
     return True
+
+
+def is_likely_english_title(title: str, doc_languages: Optional[List] = None) -> bool:
+    """Backward compatibility alias for English verification."""
+    return is_allowed_language_title(title, doc_languages, allowed_languages={"eng"})
 
 
 def fetch_scored_candidates(catalog_df: pd.DataFrame) -> (List[Dict[str, object]], bool):
@@ -1531,13 +1637,19 @@ def fetch_scored_candidates(catalog_df: pd.DataFrame) -> (List[Dict[str, object]
         for _, r in anchor_books.iterrows()
     )
 
-    anchor_pages = anchor_books["Number of Pages"].dropna()
-    valid_pages = anchor_pages[(anchor_pages >= 50) & (anchor_pages <= 2000)]
-    if len(valid_pages) >= 4:
-        p25 = float(valid_pages.quantile(0.25))
-        p75 = float(valid_pages.quantile(0.75))
+    if "Number of Pages" in catalog_df.columns:
+        valid_pages = catalog_df[catalog_df["Number of Pages"] > 0]["Number of Pages"].dropna()
+        p25 = float(valid_pages.quantile(0.25)) if len(valid_pages) >= 4 else 300.0
+        p75 = float(valid_pages.quantile(0.75)) if len(valid_pages) >= 4 else 500.0
     else:
         p25, p75 = 300.0, 500.0
+
+    # Dynamic language detection: strict English hard filter if all books English, else dynamic
+    allowed_langs, is_all_english = detect_catalog_languages(catalog_df)
+    if is_all_english:
+        lang_query = "language:eng"
+    else:
+        lang_query = "(" + " OR ".join(f"language:{l}" for l in sorted(allowed_langs)) + ")"
 
     read_titles = set(clean_book_title(t) for t in catalog_df["Title"].dropna())
     read_keys = set(str(k).strip() for k in catalog_df["ol_key"].dropna().unique()) if "ol_key" in catalog_df.columns else set()
@@ -1563,7 +1675,7 @@ def fetch_scored_candidates(catalog_df: pd.DataFrame) -> (List[Dict[str, object]
     for subj in active_subjects:
         url = "https://openlibrary.org/search.json"
         params = {
-            "q": f'subject:"{subj}" language:eng',
+            "q": f'subject:"{subj}" {lang_query}',
             "sort": "readinglog",
             "limit": 20,
             "fields": "key,title,author_name,number_of_pages_median,ratings_average,ratings_count,subject,cover_i,language",
@@ -1577,7 +1689,7 @@ def fetch_scored_candidates(catalog_df: pd.DataFrame) -> (List[Dict[str, object]
                     doc_key = str(doc.get("key") or "").strip()
                     if not c_title or c_title in seen_titles or (doc_key and doc_key in seen_keys):
                         continue
-                    if not is_likely_english_title(t, doc.get("language")):
+                    if not is_allowed_language_title(t, doc.get("language"), allowed_languages=allowed_langs):
                         continue
                     if not reads_children and is_children_book(doc.get("subject", [])):
                         continue
@@ -1597,7 +1709,7 @@ def fetch_scored_candidates(catalog_df: pd.DataFrame) -> (List[Dict[str, object]
     for auth in list(affinity_authors)[:2]:
         url = "https://openlibrary.org/search.json"
         params = {
-            "q": f'author:"{auth}" language:eng',
+            "q": f'author:"{auth}" {lang_query}',
             "sort": "readinglog",
             "limit": 12,
             "fields": "key,title,author_name,number_of_pages_median,ratings_average,ratings_count,subject,cover_i,language",
@@ -1611,7 +1723,7 @@ def fetch_scored_candidates(catalog_df: pd.DataFrame) -> (List[Dict[str, object]
                     doc_key = str(doc.get("key") or "").strip()
                     if not c_title or c_title in seen_titles or (doc_key and doc_key in seen_keys):
                         continue
-                    if not is_likely_english_title(t, doc.get("language")):
+                    if not is_allowed_language_title(t, doc.get("language"), allowed_languages=allowed_langs):
                         continue
                     if not reads_children and is_children_book(doc.get("subject", [])):
                         continue
@@ -1631,7 +1743,7 @@ def fetch_scored_candidates(catalog_df: pd.DataFrame) -> (List[Dict[str, object]
     if has_nonfiction_anchor:
         url = "https://openlibrary.org/search.json"
         params = {
-            "q": "subject:memoir OR subject:history language:eng",
+            "q": f"subject:memoir OR subject:history {lang_query}",
             "sort": "readinglog",
             "limit": 12,
             "fields": "key,title,author_name,number_of_pages_median,ratings_average,ratings_count,subject,cover_i,language",
@@ -1645,7 +1757,7 @@ def fetch_scored_candidates(catalog_df: pd.DataFrame) -> (List[Dict[str, object]
                     doc_key = str(doc.get("key") or "").strip()
                     if not c_title or c_title in seen_titles or (doc_key and doc_key in seen_keys):
                         continue
-                    if not is_likely_english_title(t, doc.get("language")):
+                    if not is_allowed_language_title(t, doc.get("language"), allowed_languages=allowed_langs):
                         continue
                     if not reads_children and is_children_book(doc.get("subject", [])):
                         continue
