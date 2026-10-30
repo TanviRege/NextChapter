@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import sqlite3
+import math
 import os
 import re
 import unicodedata
@@ -1350,25 +1351,42 @@ def calculate_length_fit(pages: Optional[float], p25: float = 300.0, p75: float 
     return max(0.0, 1.0 - (pages - p75) / 400.0)
 
 
+def calculate_era_fit(pub_year: Optional[float], target_era: float = 2020.0, era_spread: float = 15.0) -> float:
+    """
+    Computes an era affinity fit score between 0.0 and 1.0 using smooth Gaussian decay.
+    Books published near the reader's preferred era receive scores close to 1.0,
+    smoothly decaying for books from eras the reader rarely explores.
+    """
+    if not pub_year or pd.isna(pub_year) or pub_year <= 0:
+        return 0.5  # Neutral fallback when publication year is unlisted
+    diff = abs(float(pub_year) - float(target_era))
+    spread = max(10.0, float(era_spread))
+    return round(max(0.0, min(1.0, math.exp(- (diff ** 2) / (2.0 * (spread ** 2))))), 3)
+
+
 SPANISH_WORDS = {
     "el", "la", "los", "las", "un", "una", "unos", "unas", "de", "del", "al", "en", "con",
     "por", "para", "sin", "sobre", "entre", "como", "pero", "mas", "más", "este", "esta",
     "estos", "estas", "su", "sus", "vida", "muerte", "amor", "tiempo", "años", "cuento",
-    "historia", "crónica", "novela", "libro",
+    "historia", "crónica", "novela", "libro", "peseta", "pesetas", "euro", "euros", "sol",
+    "sombra", "cien", "soledad", "ficciones",
 }
 ITALIAN_WORDS = {
     "il", "lo", "la", "i", "gli", "le", "un", "uno", "una", "di", "del", "dello", "della",
     "dei", "degli", "delle", "nel", "nella", "nei", "negli", "nelle", "sul", "sulla", "da",
     "per", "tra", "fra", "con", "ed", "non", "che", "sono", "tutti", "tutto", "amore", "morte",
-    "storia", "libro", "vita",
+    "storia", "libro", "vita", "lira", "lire", "euro", "mondo",
 }
 FRENCH_WORDS = {
     "le", "la", "les", "des", "du", "de", "dans", "avec", "pour", "sur", "un", "une", "qui",
-    "que", "est", "mort", "histoire", "livre", "vie",
+    "que", "est", "mort", "histoire", "livre", "vie", "franc", "francs", "centime", "centimes",
+    "france", "paris", "chambre", "madame", "monsieur", "homme", "femme", "soleil", "jour",
+    "nuit", "temps", "petit", "petite", "grand", "grande", "belle", "beau", "chateau", "coeur",
+    "ville", "rue", "monde", "yeux", "etranger", "prince", "euro", "euros",
 }
 GERMAN_WORDS = {
     "der", "die", "das", "den", "dem", "des", "ein", "eine", "einer", "eines", "und", "mit",
-    "für", "von", "aus", "auf", "nicht", "buch", "leben",
+    "für", "von", "aus", "auf", "nicht", "buch", "leben", "mark", "pfennig", "zeit", "welt",
 }
 ENG_WORDS = {
     "the", "a", "an", "and", "of", "in", "to", "for", "with", "on", "at", "from", "by",
@@ -1376,7 +1394,11 @@ ENG_WORDS = {
     "during", "without", "before", "under", "around", "among", "is", "are", "was", "were",
     "be", "been", "being", "have", "has", "had", "do", "does", "did", "but", "if", "or",
     "because", "until", "while", "my", "your", "his", "her", "its", "our", "their", "this",
-    "that", "these", "those",
+    "that", "these", "those", "one", "two", "three", "first", "second", "last", "good",
+    "great", "little", "big", "world", "man", "woman", "life", "time", "day", "night",
+    "house", "girl", "boy", "eyes", "eye", "secret", "death", "story", "book", "love",
+    "heart", "shadow", "winter", "summer", "fall", "spring", "road", "sea", "sky",
+    "wind", "sun", "moon", "star", "stars", "garden", "city", "water", "fire", "dark", "light",
 }
 
 
@@ -1543,7 +1565,11 @@ def is_allowed_language_title(title: str, doc_languages: Optional[List] = None, 
         if first == "la" and (sp_count >= 1 or it_count >= 1 or fr_count >= 1) and eng_count == 0:
             return False
 
-        if (sp_count >= 2 or it_count >= 2 or fr_count >= 2 or de_count >= 2) and eng_count == 0:
+        # When there are no English words, any foreign indicator word rejects the title
+        if eng_count == 0 and (sp_count >= 1 or it_count >= 1 or fr_count >= 1 or de_count >= 1):
+            return False
+
+        if (sp_count >= 2 or it_count >= 2 or fr_count >= 2 or de_count >= 2) and eng_count <= 1:
             return False
 
         return True
@@ -1644,6 +1670,30 @@ def fetch_scored_candidates(catalog_df: pd.DataFrame) -> (List[Dict[str, object]
     else:
         p25, p75 = 300.0, 500.0
 
+    # Era profile & sweet spot
+    year_col = None
+    if "Original Publication Year" in catalog_df.columns:
+        year_col = "Original Publication Year"
+    elif "Year Published" in catalog_df.columns:
+        year_col = "Year Published"
+
+    valid_years = pd.Series(dtype=float)
+    if year_col:
+        valid_years = pd.to_numeric(catalog_df[year_col], errors="coerce").dropna()
+        valid_years = valid_years[(valid_years >= 1500) & (valid_years <= 2035)]
+
+    if len(valid_years) >= 3:
+        target_era = float(valid_years.median())
+        p25_y = float(valid_years.quantile(0.25))
+        p75_y = float(valid_years.quantile(0.75))
+        era_spread = max(12.0, (p75_y - p25_y) * 1.2)
+        min_user_year = float(valid_years.min())
+        is_contemporary_reader = (target_era >= 1995 and min_user_year >= 1960)
+    else:
+        target_era = 2020.0
+        era_spread = 15.0
+        is_contemporary_reader = True
+
     # Dynamic language detection: strict English hard filter if all books English, else dynamic
     allowed_langs, is_all_english = detect_catalog_languages(catalog_df)
     if is_all_english:
@@ -1678,7 +1728,7 @@ def fetch_scored_candidates(catalog_df: pd.DataFrame) -> (List[Dict[str, object]
             "q": f'subject:"{subj}" {lang_query}',
             "sort": "readinglog",
             "limit": 20,
-            "fields": "key,title,author_name,number_of_pages_median,ratings_average,ratings_count,subject,cover_i,language",
+            "fields": "key,title,author_name,first_publish_year,number_of_pages_median,ratings_average,ratings_count,subject,cover_i,language",
         }
         try:
             resp = requests.get(url, params=params, headers=headers, timeout=8)
@@ -1692,6 +1742,9 @@ def fetch_scored_candidates(catalog_df: pd.DataFrame) -> (List[Dict[str, object]
                     if not is_allowed_language_title(t, doc.get("language"), allowed_languages=allowed_langs):
                         continue
                     if not reads_children and is_children_book(doc.get("subject", [])):
+                        continue
+                    cand_year = doc.get("first_publish_year")
+                    if is_contemporary_reader and cand_year and isinstance(cand_year, (int, float)) and cand_year < 1960:
                         continue
                     auth_list = doc.get("author_name") or []
                     cand_auth = auth_list[0].strip().lower() if auth_list else ""
@@ -1712,7 +1765,7 @@ def fetch_scored_candidates(catalog_df: pd.DataFrame) -> (List[Dict[str, object]
             "q": f'author:"{auth}" {lang_query}',
             "sort": "readinglog",
             "limit": 12,
-            "fields": "key,title,author_name,number_of_pages_median,ratings_average,ratings_count,subject,cover_i,language",
+            "fields": "key,title,author_name,first_publish_year,number_of_pages_median,ratings_average,ratings_count,subject,cover_i,language",
         }
         try:
             resp = requests.get(url, params=params, headers=headers, timeout=8)
@@ -1726,6 +1779,9 @@ def fetch_scored_candidates(catalog_df: pd.DataFrame) -> (List[Dict[str, object]
                     if not is_allowed_language_title(t, doc.get("language"), allowed_languages=allowed_langs):
                         continue
                     if not reads_children and is_children_book(doc.get("subject", [])):
+                        continue
+                    cand_year = doc.get("first_publish_year")
+                    if is_contemporary_reader and cand_year and isinstance(cand_year, (int, float)) and cand_year < 1960:
                         continue
                     auth_list = doc.get("author_name") or []
                     cand_auth = auth_list[0].strip().lower() if auth_list else ""
@@ -1746,7 +1802,7 @@ def fetch_scored_candidates(catalog_df: pd.DataFrame) -> (List[Dict[str, object]
             "q": f"subject:memoir OR subject:history {lang_query}",
             "sort": "readinglog",
             "limit": 12,
-            "fields": "key,title,author_name,number_of_pages_median,ratings_average,ratings_count,subject,cover_i,language",
+            "fields": "key,title,author_name,first_publish_year,number_of_pages_median,ratings_average,ratings_count,subject,cover_i,language",
         }
         try:
             resp = requests.get(url, params=params, headers=headers, timeout=8)
@@ -1760,6 +1816,9 @@ def fetch_scored_candidates(catalog_df: pd.DataFrame) -> (List[Dict[str, object]
                     if not is_allowed_language_title(t, doc.get("language"), allowed_languages=allowed_langs):
                         continue
                     if not reads_children and is_children_book(doc.get("subject", [])):
+                        continue
+                    cand_year = doc.get("first_publish_year")
+                    if is_contemporary_reader and cand_year and isinstance(cand_year, (int, float)) and cand_year < 1960:
                         continue
                     auth_list = doc.get("author_name") or []
                     cand_auth = auth_list[0].strip().lower() if auth_list else ""
@@ -1793,6 +1852,7 @@ def fetch_scored_candidates(catalog_df: pd.DataFrame) -> (List[Dict[str, object]
         authors = doc.get("author_name", ["Unknown Author"])
         author = authors[0] if authors else "Unknown Author"
         pages = doc.get("number_of_pages_median")
+        cand_year = doc.get("first_publish_year")
         ratings_avg = doc.get("ratings_average") or 0.0
         ratings_cnt = doc.get("ratings_count") or 0
         subjects = doc.get("subject", [])
@@ -1802,15 +1862,23 @@ def fetch_scored_candidates(catalog_df: pd.DataFrame) -> (List[Dict[str, object]
 
         subject_fit = max(0.0, min(1.0, (raw_subject_scores[i] - min_raw) / raw_spread))
         author_bonus = 1.0 if any(a.lower() in affinity_authors for a in authors) else 0.0
+        era_fit = calculate_era_fit(cand_year, target_era, era_spread)
         community = min(1.0, float(ratings_avg) / 5.0) if ratings_cnt >= 100 else 0.0
         length_fit = calculate_length_fit(pages, p25, p75)
 
-        score = (0.55 * subject_fit) + (0.20 * author_bonus) + (0.15 * community) + (0.10 * length_fit)
+        score = (
+            (0.45 * subject_fit) +
+            (0.20 * author_bonus) +
+            (0.15 * era_fit) +
+            (0.10 * community) +
+            (0.10 * length_fit)
+        )
 
         scored_candidates.append({
             "key": doc.get("key"),
             "title": title,
             "author": author,
+            "year": cand_year,
             "pages": pages,
             "ratings_avg": round(ratings_avg, 2),
             "ratings_cnt": ratings_cnt,
@@ -1819,6 +1887,7 @@ def fetch_scored_candidates(catalog_df: pd.DataFrame) -> (List[Dict[str, object]
             "is_nonfiction": is_nonfiction,
             "subject_fit": subject_fit,
             "author_bonus": author_bonus,
+            "era_fit": era_fit,
             "community": community,
             "length_fit": length_fit,
             "score": score,
@@ -2058,9 +2127,11 @@ def render_recommendations_section(catalog_df: pd.DataFrame):
 
                 st.markdown(f"**{b['title']}**\n\n<small style='color: #cbd5e1;'>by {b['author']}</small>", unsafe_allow_html=True)
 
+                year_t = f"🗓️ {int(b['year'])}" if b.get("year") else ""
                 pages_t = f"📖 {int(b['pages'])}p" if b.get("pages") else "📖 N/A"
                 comm_t = f"★ {b['ratings_avg']}" if b.get("ratings_avg") else "★ N/A"
-                st.caption(f"{pages_t} • {comm_t}")
+                meta_parts = [p for p in [year_t, pages_t, comm_t] if p]
+                st.caption(" • ".join(meta_parts))
 
                 st.markdown(f"<div style='font-size: 11px; color: #93c5fd; font-style: italic; min-height: 40px; margin-bottom: 4px;'>💡 {b.get('pick_reason', '')}</div>", unsafe_allow_html=True)
 

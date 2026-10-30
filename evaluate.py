@@ -19,6 +19,7 @@ Results are saved to evaluation_results.json for reproducibility.
 
 import argparse
 import json
+import math
 import os
 import re
 import sys
@@ -62,6 +63,14 @@ def calculate_length_fit(pages: Optional[float], p25: float = 300.0, p75: float 
     if pages < p25:
         return max(0.0, 1.0 - (p25 - pages) / 200.0)
     return max(0.0, 1.0 - (pages - p75) / 400.0)
+
+
+def calculate_era_fit(pub_year: Optional[float], target_era: float = 2020.0, era_spread: float = 15.0) -> float:
+    if not pub_year or pd.isna(pub_year) or pub_year <= 0:
+        return 0.5
+    diff = abs(float(pub_year) - float(target_era))
+    spread = max(10.0, float(era_spread))
+    return round(max(0.0, min(1.0, math.exp(- (diff ** 2) / (2.0 * (spread ** 2))))), 3)
 
 
 # ── Core recommender logic (extracted from app.py for offline use) ───────────
@@ -116,6 +125,22 @@ def fetch_scored_candidates(catalog_df: pd.DataFrame) -> Tuple[List[Dict], bool]
     else:
         p25, p75 = 300.0, 500.0
 
+    # Era profile & sweet spot
+    year_col = "Original Publication Year" if "Original Publication Year" in catalog_df.columns else ("Year Published" if "Year Published" in catalog_df.columns else None)
+    valid_years = pd.to_numeric(catalog_df[year_col], errors="coerce").dropna() if year_col else pd.Series(dtype=float)
+    valid_years = valid_years[(valid_years >= 1500) & (valid_years <= 2035)]
+    if len(valid_years) >= 3:
+        target_era = float(valid_years.median())
+        p25_y = float(valid_years.quantile(0.25))
+        p75_y = float(valid_years.quantile(0.75))
+        era_spread = max(12.0, (p75_y - p25_y) * 1.2)
+        min_user_year = float(valid_years.min())
+        is_contemporary_reader = (target_era >= 1995 and min_user_year >= 1960)
+    else:
+        target_era = 2020.0
+        era_spread = 15.0
+        is_contemporary_reader = True
+
     read_titles = set(clean_book_title(t) for t in catalog_df["Title"].dropna())
     candidates = []
     seen_titles = set(read_titles)
@@ -132,7 +157,7 @@ def fetch_scored_candidates(catalog_df: pd.DataFrame) -> Tuple[List[Dict], bool]
             "q": f'subject:"{subj}" language:eng',
             "sort": "readinglog",
             "limit": 15,
-            "fields": "key,title,author_name,number_of_pages_median,ratings_average,ratings_count,subject,cover_i",
+            "fields": "key,title,author_name,first_publish_year,number_of_pages_median,ratings_average,ratings_count,subject,cover_i",
         }
         try:
             resp = requests.get(url, params=params, headers=headers, timeout=8)
@@ -143,6 +168,9 @@ def fetch_scored_candidates(catalog_df: pd.DataFrame) -> Tuple[List[Dict], bool]
                     if not c_title or c_title in seen_titles:
                         continue
                     if not reads_children and is_children_book(doc.get("subject", [])):
+                        continue
+                    cand_year = doc.get("first_publish_year")
+                    if is_contemporary_reader and cand_year and isinstance(cand_year, (int, float)) and cand_year < 1960:
                         continue
                     seen_titles.add(c_title)
                     doc["is_nonfiction"] = False
@@ -157,7 +185,7 @@ def fetch_scored_candidates(catalog_df: pd.DataFrame) -> Tuple[List[Dict], bool]
             "author": auth,
             "sort": "readinglog",
             "limit": 6,
-            "fields": "key,title,author_name,number_of_pages_median,ratings_average,ratings_count,subject,cover_i",
+            "fields": "key,title,author_name,first_publish_year,number_of_pages_median,ratings_average,ratings_count,subject,cover_i",
         }
         try:
             resp = requests.get(url, params=params, headers=headers, timeout=8)
@@ -168,6 +196,9 @@ def fetch_scored_candidates(catalog_df: pd.DataFrame) -> Tuple[List[Dict], bool]
                     if not c_title or c_title in seen_titles:
                         continue
                     if not reads_children and is_children_book(doc.get("subject", [])):
+                        continue
+                    cand_year = doc.get("first_publish_year")
+                    if is_contemporary_reader and cand_year and isinstance(cand_year, (int, float)) and cand_year < 1960:
                         continue
                     seen_titles.add(c_title)
                     doc["is_nonfiction"] = False
@@ -182,7 +213,7 @@ def fetch_scored_candidates(catalog_df: pd.DataFrame) -> Tuple[List[Dict], bool]
             "q": "subject:memoir OR subject:history language:eng",
             "sort": "readinglog",
             "limit": 10,
-            "fields": "key,title,author_name,number_of_pages_median,ratings_average,ratings_count,subject,cover_i",
+            "fields": "key,title,author_name,first_publish_year,number_of_pages_median,ratings_average,ratings_count,subject,cover_i",
         }
         try:
             resp = requests.get(url, params=params, headers=headers, timeout=8)
@@ -193,6 +224,9 @@ def fetch_scored_candidates(catalog_df: pd.DataFrame) -> Tuple[List[Dict], bool]
                     if not c_title or c_title in seen_titles:
                         continue
                     if not reads_children and is_children_book(doc.get("subject", [])):
+                        continue
+                    cand_year = doc.get("first_publish_year")
+                    if is_contemporary_reader and cand_year and isinstance(cand_year, (int, float)) and cand_year < 1960:
                         continue
                     seen_titles.add(c_title)
                     doc["is_nonfiction"] = True
@@ -219,6 +253,7 @@ def fetch_scored_candidates(catalog_df: pd.DataFrame) -> Tuple[List[Dict], bool]
         authors = doc.get("author_name", ["Unknown Author"])
         author = authors[0] if authors else "Unknown Author"
         pages = doc.get("number_of_pages_median")
+        cand_year = doc.get("first_publish_year")
         ratings_avg = doc.get("ratings_average") or 0.0
         ratings_cnt = doc.get("ratings_count") or 0
         subjects = doc.get("subject", [])
@@ -226,15 +261,23 @@ def fetch_scored_candidates(catalog_df: pd.DataFrame) -> Tuple[List[Dict], bool]
 
         subject_fit = max(0.0, min(1.0, (raw_subject_scores[i] - min_raw) / raw_spread))
         author_bonus = 1.0 if any(a.lower() in affinity_authors for a in authors) else 0.0
+        era_fit = calculate_era_fit(cand_year, target_era, era_spread)
         community = min(1.0, float(ratings_avg) / 5.0) if ratings_cnt >= 100 else 0.0
         length_fit = calculate_length_fit(pages, p25, p75)
 
-        score = (0.55 * subject_fit) + (0.20 * author_bonus) + (0.15 * community) + (0.10 * length_fit)
+        score = (
+            (0.45 * subject_fit) +
+            (0.20 * author_bonus) +
+            (0.15 * era_fit) +
+            (0.10 * community) +
+            (0.10 * length_fit)
+        )
 
         scored_candidates.append({
             "key": doc.get("key"),
             "title": title,
             "author": author,
+            "year": cand_year,
             "pages": pages,
             "ratings_avg": round(ratings_avg, 2),
             "ratings_cnt": ratings_cnt,
