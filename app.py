@@ -20,6 +20,9 @@ TABLE_NAME = "user_catalog"
 FEEDBACK_DB = "feedback.db"
 TEMPLATE_PATH = "goodreads-template.csv"
 
+# Active recommendation engine identifier ("heuristic" or "knn")
+CURRENT_MODEL = "heuristic"
+
 
 def init_feedback_db(db_name=FEEDBACK_DB):
     conn = sqlite3.connect(db_name)
@@ -33,14 +36,19 @@ def init_feedback_db(db_name=FEEDBACK_DB):
             author TEXT,
             taste_match_pct REAL,
             action TEXT,
-            ol_key TEXT
+            ol_key TEXT,
+            model TEXT
         )
     """)
+    cursor.execute("PRAGMA table_info(recommendation_feedback)")
+    cols = [col[1] for col in cursor.fetchall()]
+    if "model" not in cols:
+        cursor.execute("ALTER TABLE recommendation_feedback ADD COLUMN model TEXT")
     conn.commit()
     conn.close()
 
 
-def log_feedback_batch(items: List[Dict], db_name=FEEDBACK_DB):
+def log_feedback_batch(items: List[Dict], db_name=FEEDBACK_DB, model: str = CURRENT_MODEL):
     if not items:
         return
     init_feedback_db(db_name)
@@ -48,10 +56,11 @@ def log_feedback_batch(items: List[Dict], db_name=FEEDBACK_DB):
         conn = sqlite3.connect(db_name)
         cursor = conn.cursor()
         for it in items:
+            item_model = it.get("model") or model
             cursor.execute("""
-                INSERT INTO recommendation_feedback (session_id, timestamp, title, author, taste_match_pct, action, ol_key)
-                VALUES (?, datetime('now'), ?, ?, ?, ?, ?)
-            """, (it.get("session_id"), it.get("title"), it.get("author"), float(it.get("taste_match_pct") or 0.0), it.get("action"), it.get("ol_key")))
+                INSERT INTO recommendation_feedback (session_id, timestamp, title, author, taste_match_pct, action, ol_key, model)
+                VALUES (?, datetime('now'), ?, ?, ?, ?, ?, ?)
+            """, (it.get("session_id"), it.get("title"), it.get("author"), float(it.get("taste_match_pct") or 0.0), it.get("action"), it.get("ol_key"), item_model))
         conn.commit()
         conn.close()
     except Exception:
@@ -60,7 +69,7 @@ def log_feedback_batch(items: List[Dict], db_name=FEEDBACK_DB):
     try:
         webhook_url = st.secrets.get("GSHEETS_WEBHOOK_URL", "")
         if webhook_url:
-            def _worker(url=webhook_url, payload_list=list(items)):
+            def _worker(url=webhook_url, payload_list=list(items), default_model=model):
                 for p in payload_list:
                     try:
                         requests.post(url, json={
@@ -70,6 +79,7 @@ def log_feedback_batch(items: List[Dict], db_name=FEEDBACK_DB):
                             "taste_match_pct": float(p.get("taste_match_pct") or 0.0),
                             "action": p.get("action", ""),
                             "ol_key": p.get("ol_key") or "",
+                            "model": p.get("model") or default_model,
                         }, timeout=8)
                         time.sleep(0.15)
                     except Exception:
@@ -80,7 +90,7 @@ def log_feedback_batch(items: List[Dict], db_name=FEEDBACK_DB):
         pass
 
 
-def log_recommendation_feedback(session_id: str, title: str, author: str, taste_match_pct: float, action: str, ol_key: str = None, db_name=FEEDBACK_DB):
+def log_recommendation_feedback(session_id: str, title: str, author: str, taste_match_pct: float, action: str, ol_key: str = None, model: str = CURRENT_MODEL, db_name=FEEDBACK_DB):
     log_feedback_batch([{
         "session_id": session_id,
         "title": title,
@@ -88,7 +98,8 @@ def log_recommendation_feedback(session_id: str, title: str, author: str, taste_
         "taste_match_pct": taste_match_pct,
         "action": action,
         "ol_key": ol_key,
-    }], db_name=db_name)
+        "model": model,
+    }], db_name=db_name, model=model)
 
 
 def fetch_feedback_summary(db_name=FEEDBACK_DB) -> pd.DataFrame:
@@ -2047,6 +2058,7 @@ def render_recommendations_section(catalog_df: pd.DataFrame):
                             "taste_match_pct": p.get("taste_match", 0),
                             "action": "shown",
                             "ol_key": p.get("key"),
+                            "model": CURRENT_MODEL,
                         }
                         for p in picks
                     ])
@@ -2098,6 +2110,7 @@ def render_recommendations_section(catalog_df: pd.DataFrame):
                             "taste_match_pct": p.get("taste_match", 0),
                             "action": "shown",
                             "ol_key": p.get("key"),
+                            "model": CURRENT_MODEL,
                         }
                         for p in next_picks
                     ])
@@ -2175,6 +2188,7 @@ def render_recommendations_section(catalog_df: pd.DataFrame):
                             taste_match_pct=b.get("taste_match", 0),
                             action="interested",
                             ol_key=b.get("key"),
+                            model=CURRENT_MODEL,
                         )
                         st.session_state["interested_titles"].add(c_title)
                         st.rerun()
@@ -2190,6 +2204,7 @@ def render_recommendations_section(catalog_df: pd.DataFrame):
                             taste_match_pct=b.get("taste_match", 0),
                             action="already_read",
                             ol_key=b.get("key"),
+                            model=CURRENT_MODEL,
                         )
                         st.session_state["read_titles"].add(c_title)
                         st.rerun()
@@ -2347,7 +2362,7 @@ with tab_paste:
     user_text = st.text_area(
         "Paste book list here:",
         height=200,
-        placeholder="Example: Harry Potter and the Order of Phoenix, J.K. Rowling, 4.5",
+        placeholder="Example: Harry Potter and the Prisoner of Azkaban, J.K. Rowling, 4.5",
         label_visibility="collapsed",
         disabled=has_data,
     )
