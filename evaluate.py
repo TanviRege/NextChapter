@@ -234,6 +234,38 @@ def fetch_scored_candidates(catalog_df: pd.DataFrame) -> Tuple[List[Dict], bool]
         except Exception:
             pass
 
+    # Dynamic backfill if filters pruned too many candidates
+    TARGET_MIN = 20
+    if len(candidates) < TARGET_MIN:
+        for auth in list(affinity_authors)[2:]:
+            if len(candidates) >= TARGET_MIN:
+                break
+            url = "https://openlibrary.org/search.json"
+            params = {
+                "author": auth,
+                "sort": "readinglog",
+                "limit": 8,
+                "fields": "key,title,author_name,first_publish_year,number_of_pages_median,ratings_average,ratings_count,subject,cover_i",
+            }
+            try:
+                resp = requests.get(url, params=params, headers=headers, timeout=8)
+                if resp.status_code == 200:
+                    for doc in resp.json().get("docs", []):
+                        t = doc.get("title")
+                        c_title = clean_book_title(t)
+                        if not c_title or c_title in seen_titles:
+                            continue
+                        if not reads_children and is_children_book(doc.get("subject", [])):
+                            continue
+                        cand_year = doc.get("first_publish_year")
+                        if is_contemporary_reader and cand_year and isinstance(cand_year, (int, float)) and cand_year < 1960:
+                            continue
+                        seen_titles.add(c_title)
+                        doc["is_nonfiction"] = False
+                        candidates.append(doc)
+            except Exception:
+                pass
+
     if not candidates:
         return [], has_nonfiction_anchor
 

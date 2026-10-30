@@ -1716,16 +1716,44 @@ def fetch_scored_candidates(catalog_df: pd.DataFrame) -> (List[Dict[str, object]
     seen_titles = set(read_titles)
     seen_keys = set(read_keys)
     headers = {"User-Agent": "NextChapterBookApp/1.0 (educational research)"}
+    era_query = "publish_year:[1970 TO *]" if is_contemporary_reader else ""
+
+    def add_valid_candidate(doc: dict, is_nonfiction: bool = False) -> bool:
+        t = doc.get("title")
+        c_title = clean_book_title(t)
+        doc_key = str(doc.get("key") or "").strip()
+        if not c_title or c_title in seen_titles or (doc_key and doc_key in seen_keys):
+            return False
+        if not is_allowed_language_title(t, doc.get("language"), allowed_languages=allowed_langs):
+            return False
+        if not reads_children and is_children_book(doc.get("subject", [])):
+            return False
+        cand_year = doc.get("first_publish_year")
+        if is_contemporary_reader and cand_year and isinstance(cand_year, (int, float)) and cand_year < 1960:
+            return False
+        auth_list = doc.get("author_name") or []
+        cand_auth = auth_list[0].strip().lower() if auth_list else ""
+        if cand_auth in read_author_to_titles:
+            if any(c_title in r_t or r_t in c_title for r_t in read_author_to_titles[cand_auth]):
+                return False
+        seen_titles.add(c_title)
+        if doc_key:
+            seen_keys.add(doc_key)
+        doc["is_nonfiction"] = is_nonfiction
+        candidates.append(doc)
+        return True
 
     generic_tags = {"fiction", "general", "fiction / general", "nonfiction"}
     active_subjects = [s for s, _ in top_subjects if s.lower() not in generic_tags][:3]
     if not active_subjects:
         active_subjects = [s for s, _ in top_subjects][:2]
 
+    # Primary Pass 1: Active top subjects
     for subj in active_subjects:
         url = "https://openlibrary.org/search.json"
+        query_str = f'subject:"{subj}" {lang_query} {era_query}'.strip()
         params = {
-            "q": f'subject:"{subj}" {lang_query}',
+            "q": query_str,
             "sort": "readinglog",
             "limit": 20,
             "fields": "key,title,author_name,first_publish_year,number_of_pages_median,ratings_average,ratings_count,subject,cover_i,language",
@@ -1734,35 +1762,17 @@ def fetch_scored_candidates(catalog_df: pd.DataFrame) -> (List[Dict[str, object]
             resp = requests.get(url, params=params, headers=headers, timeout=8)
             if resp.status_code == 200:
                 for doc in resp.json().get("docs", []):
-                    t = doc.get("title")
-                    c_title = clean_book_title(t)
-                    doc_key = str(doc.get("key") or "").strip()
-                    if not c_title or c_title in seen_titles or (doc_key and doc_key in seen_keys):
-                        continue
-                    if not is_allowed_language_title(t, doc.get("language"), allowed_languages=allowed_langs):
-                        continue
-                    if not reads_children and is_children_book(doc.get("subject", [])):
-                        continue
-                    cand_year = doc.get("first_publish_year")
-                    if is_contemporary_reader and cand_year and isinstance(cand_year, (int, float)) and cand_year < 1960:
-                        continue
-                    auth_list = doc.get("author_name") or []
-                    cand_auth = auth_list[0].strip().lower() if auth_list else ""
-                    if cand_auth in read_author_to_titles:
-                        if any(c_title in r_t or r_t in c_title for r_t in read_author_to_titles[cand_auth]):
-                            continue
-                    seen_titles.add(c_title)
-                    if doc_key:
-                        seen_keys.add(doc_key)
-                    doc["is_nonfiction"] = False
-                    candidates.append(doc)
+                    add_valid_candidate(doc, is_nonfiction=False)
         except Exception:
             pass
 
-    for auth in list(affinity_authors)[:2]:
+    # Primary Pass 2: Favorite anchor authors (up to 3)
+    anchor_author_list = list(affinity_authors)
+    for auth in anchor_author_list[:3]:
         url = "https://openlibrary.org/search.json"
+        query_str = f'author:"{auth}" {lang_query} {era_query}'.strip()
         params = {
-            "q": f'author:"{auth}" {lang_query}',
+            "q": query_str,
             "sort": "readinglog",
             "limit": 12,
             "fields": "key,title,author_name,first_publish_year,number_of_pages_median,ratings_average,ratings_count,subject,cover_i,language",
@@ -1771,35 +1781,16 @@ def fetch_scored_candidates(catalog_df: pd.DataFrame) -> (List[Dict[str, object]
             resp = requests.get(url, params=params, headers=headers, timeout=8)
             if resp.status_code == 200:
                 for doc in resp.json().get("docs", []):
-                    t = doc.get("title")
-                    c_title = clean_book_title(t)
-                    doc_key = str(doc.get("key") or "").strip()
-                    if not c_title or c_title in seen_titles or (doc_key and doc_key in seen_keys):
-                        continue
-                    if not is_allowed_language_title(t, doc.get("language"), allowed_languages=allowed_langs):
-                        continue
-                    if not reads_children and is_children_book(doc.get("subject", [])):
-                        continue
-                    cand_year = doc.get("first_publish_year")
-                    if is_contemporary_reader and cand_year and isinstance(cand_year, (int, float)) and cand_year < 1960:
-                        continue
-                    auth_list = doc.get("author_name") or []
-                    cand_auth = auth_list[0].strip().lower() if auth_list else ""
-                    if cand_auth in read_author_to_titles:
-                        if any(c_title in r_t or r_t in c_title for r_t in read_author_to_titles[cand_auth]):
-                            continue
-                    seen_titles.add(c_title)
-                    if doc_key:
-                        seen_keys.add(doc_key)
-                    doc["is_nonfiction"] = False
-                    candidates.append(doc)
+                    add_valid_candidate(doc, is_nonfiction=False)
         except Exception:
             pass
 
+    # Primary Pass 3: Nonfiction if anchor present
     if has_nonfiction_anchor:
         url = "https://openlibrary.org/search.json"
+        query_str = f"subject:memoir OR subject:history {lang_query} {era_query}".strip()
         params = {
-            "q": f"subject:memoir OR subject:history {lang_query}",
+            "q": query_str,
             "sort": "readinglog",
             "limit": 12,
             "fields": "key,title,author_name,first_publish_year,number_of_pages_median,ratings_average,ratings_count,subject,cover_i,language",
@@ -1808,30 +1799,74 @@ def fetch_scored_candidates(catalog_df: pd.DataFrame) -> (List[Dict[str, object]
             resp = requests.get(url, params=params, headers=headers, timeout=8)
             if resp.status_code == 200:
                 for doc in resp.json().get("docs", []):
-                    t = doc.get("title")
-                    c_title = clean_book_title(t)
-                    doc_key = str(doc.get("key") or "").strip()
-                    if not c_title or c_title in seen_titles or (doc_key and doc_key in seen_keys):
-                        continue
-                    if not is_allowed_language_title(t, doc.get("language"), allowed_languages=allowed_langs):
-                        continue
-                    if not reads_children and is_children_book(doc.get("subject", [])):
-                        continue
-                    cand_year = doc.get("first_publish_year")
-                    if is_contemporary_reader and cand_year and isinstance(cand_year, (int, float)) and cand_year < 1960:
-                        continue
-                    auth_list = doc.get("author_name") or []
-                    cand_auth = auth_list[0].strip().lower() if auth_list else ""
-                    if cand_auth in read_author_to_titles:
-                        if any(c_title in r_t or r_t in c_title for r_t in read_author_to_titles[cand_auth]):
-                            continue
-                    seen_titles.add(c_title)
-                    if doc_key:
-                        seen_keys.add(doc_key)
-                    doc["is_nonfiction"] = True
-                    candidates.append(doc)
+                    add_valid_candidate(doc, is_nonfiction=True)
         except Exception:
             pass
+
+    # ── Auto-Repopulation / Dynamic Backfill ──────────────────────────────────
+    # If edge case filters (language, era, juvenile, duplicates) eliminated too many candidates,
+    # automatically backfill with additional favorite authors, secondary subjects, and curated fallbacks.
+    TARGET_MIN_CANDIDATES = 25
+    if len(candidates) < TARGET_MIN_CANDIDATES:
+        # Repopulation Step A: Query remaining anchor authors
+        for auth in anchor_author_list[3:]:
+            if len(candidates) >= TARGET_MIN_CANDIDATES:
+                break
+            url = "https://openlibrary.org/search.json"
+            query_str = f'author:"{auth}" {lang_query} {era_query}'.strip()
+            params = {
+                "q": query_str,
+                "sort": "readinglog",
+                "limit": 10,
+                "fields": "key,title,author_name,first_publish_year,number_of_pages_median,ratings_average,ratings_count,subject,cover_i,language",
+            }
+            try:
+                resp = requests.get(url, params=params, headers=headers, timeout=8)
+                if resp.status_code == 200:
+                    for doc in resp.json().get("docs", []):
+                        add_valid_candidate(doc, is_nonfiction=False)
+            except Exception:
+                pass
+
+        # Repopulation Step B: Query secondary subjects if available
+        secondary_subjects = [s for s, _ in top_subjects if s.lower() not in generic_tags and s not in active_subjects][:4]
+        for subj in secondary_subjects:
+            if len(candidates) >= TARGET_MIN_CANDIDATES:
+                break
+            url = "https://openlibrary.org/search.json"
+            query_str = f'subject:"{subj}" {lang_query} {era_query}'.strip()
+            params = {
+                "q": query_str,
+                "sort": "readinglog",
+                "limit": 15,
+                "fields": "key,title,author_name,first_publish_year,number_of_pages_median,ratings_average,ratings_count,subject,cover_i,language",
+            }
+            try:
+                resp = requests.get(url, params=params, headers=headers, timeout=8)
+                if resp.status_code == 200:
+                    for doc in resp.json().get("docs", []):
+                        add_valid_candidate(doc, is_nonfiction=False)
+            except Exception:
+                pass
+
+        # Repopulation Step C: Fallback to Curated High-Affinity Contemporary Reads if still sparse
+        if len(candidates) < TARGET_MIN_CANDIDATES:
+            CURATED_CONTEMPORARY_FALLBACKS = [
+                {"title": "The Four Winds", "author_name": ["Kristin Hannah"], "first_publish_year": 2021, "subject": ["historical fiction", "drama", "family"], "number_of_pages_median": 464, "ratings_average": 4.35, "ratings_count": 350000, "language": ["eng"]},
+                {"title": "The Great Alone", "author_name": ["Kristin Hannah"], "first_publish_year": 2018, "subject": ["fiction", "drama", "adventure", "survival"], "number_of_pages_median": 440, "ratings_average": 4.40, "ratings_count": 400000, "language": ["eng"]},
+                {"title": "The Maid", "author_name": ["Nita Prose"], "first_publish_year": 2022, "subject": ["mystery", "cozy mystery", "thriller", "crime fiction"], "number_of_pages_median": 304, "ratings_average": 3.85, "ratings_count": 280000, "language": ["eng"]},
+                {"title": "The Bullet That Missed", "author_name": ["Richard Osman"], "first_publish_year": 2022, "subject": ["mystery", "humor", "crime", "cozy mystery"], "number_of_pages_median": 432, "ratings_average": 4.28, "ratings_count": 180000, "language": ["eng"]},
+                {"title": "Lessons in Chemistry", "author_name": ["Bonnie Garmus"], "first_publish_year": 2022, "subject": ["historical fiction", "humor", "science", "feminism"], "number_of_pages_median": 400, "ratings_average": 4.30, "ratings_count": 600000, "language": ["eng"]},
+                {"title": "Project Hail Mary", "author_name": ["Andy Weir"], "first_publish_year": 2021, "subject": ["science fiction", "space exploration", "hard sci-fi"], "number_of_pages_median": 496, "ratings_average": 4.52, "ratings_count": 450000, "language": ["eng"]},
+                {"title": "Yellowface", "author_name": ["R.F. Kuang"], "first_publish_year": 2023, "subject": ["satire", "contemporary fiction", "publishing", "drama"], "number_of_pages_median": 336, "ratings_average": 3.90, "ratings_count": 250000, "language": ["eng"]},
+                {"title": "Daisy Jones & The Six", "author_name": ["Taylor Jenkins Reid"], "first_publish_year": 2019, "subject": ["historical fiction", "music", "drama"], "number_of_pages_median": 368, "ratings_average": 4.20, "ratings_count": 500000, "language": ["eng"]},
+                {"title": "A Man Called Ove", "author_name": ["Fredrik Backman"], "first_publish_year": 2012, "subject": ["contemporary fiction", "humor", "drama"], "number_of_pages_median": 337, "ratings_average": 4.38, "ratings_count": 700000, "language": ["eng"]},
+                {"title": "Tomorrow, and Tomorrow, and Tomorrow", "author_name": ["Gabrielle Zevin"], "first_publish_year": 2022, "subject": ["fiction", "video games", "friendship", "drama"], "number_of_pages_median": 416, "ratings_average": 4.22, "ratings_count": 380000, "language": ["eng"]},
+            ]
+            for fb in CURATED_CONTEMPORARY_FALLBACKS:
+                if len(candidates) >= TARGET_MIN_CANDIDATES:
+                    break
+                add_valid_candidate(fb, is_nonfiction=False)
 
     if not candidates:
         return [], has_nonfiction_anchor
