@@ -14,6 +14,13 @@ import threading
 import time
 from PIL import Image, ImageDraw, ImageFont
 from typing import Dict, Optional, Union, List, Set, Tuple
+try:
+    import numpy as np
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from sklearn.neighbors import NearestNeighbors
+    SKLEARN_AVAILABLE = True
+except ImportError:
+    SKLEARN_AVAILABLE = False
 
 DB_NAME = "catalog.db"
 TABLE_NAME = "user_catalog"
@@ -21,7 +28,7 @@ FEEDBACK_DB = "feedback.db"
 TEMPLATE_PATH = "goodreads-template.csv"
 
 # Active recommendation engine identifier ("heuristic" or "knn")
-CURRENT_MODEL = "heuristic"
+CURRENT_MODEL = "knn"
 
 
 def init_feedback_db(db_name=FEEDBACK_DB):
@@ -1615,6 +1622,268 @@ def is_likely_english_title(title: str, doc_languages: Optional[List] = None) ->
     return is_allowed_language_title(title, doc_languages, allowed_languages={"eng"})
 
 
+
+# ── k-NN Recommendation Engine ────────────────────────────────────────────────
+
+def build_feature_soup(row: Dict) -> str:
+    """
+    Builds a TF-IDF feature string for a book record.
+    Combines author, genres, title tokens, and an era bucket tag for
+    era-affinity-aware cosine similarity in TF-IDF space.
+    """
+    parts = []
+    author = str(row.get("Author") or row.get("author") or "").lower().strip()
+    if author:
+        parts.append(author.replace(" ", ""))   # collapsed token e.g. 'kristinhannah'
+        parts.append(author)                    # spaced token  e.g. 'kristin hannah'
+
+    genres = str(row.get("genres") or "")
+    if genres and genres.lower() not in ["none", "nan", "n/a"]:
+        genres_clean = re.sub(r"[^a-zA-Z0-9\s,]", "", genres).lower()
+        parts.append(genres_clean)
+
+    title = str(row.get("Title") or row.get("title") or "").lower()
+    parts.append(re.sub(r"[^\w\s]", "", title))
+
+    # Era bucket token — carries era affinity into TF-IDF space
+    year = (
+        row.get("Original Publication Year")
+        or row.get("Year Published")
+        or row.get("year")
+    )
+    try:
+        y_val = float(year)
+        if y_val >= 2010:
+            parts.append("era_contemporary era_2010s_2020s")
+        elif y_val >= 1990:
+            parts.append("era_modern era_1990s_2000s")
+        elif y_val >= 1950:
+            parts.append("era_mid_20th")
+        elif y_val > 0:
+            parts.append("era_classic")
+    except (ValueError, TypeError):
+        pass
+
+    return " ".join(parts).strip()
+
+
+def generate_knn_recommendations(
+    catalog_df: pd.DataFrame,
+    candidate_docs: List[Dict],
+    max_picks: int = 30,
+) -> List[Dict]:
+    """
+    Ranks candidate books by cosine similarity to a TF-IDF user taste vector.
+
+    Algorithm:
+      1. Build feature soups for catalog books (author + genres + title + era token).
+      2. Compute a rating-weighted centroid vector from 4-5-star anchor reads.
+      3. Fit a shared TF-IDF over catalog + candidates so vocabulary is shared.
+      4. Query k-NN (cosine metric) on candidate vectors against the taste vector.
+      5. Return ranked list with taste_match % scaled to 75-98 range.
+
+    Returns dicts compatible with select_diverse_recommendations().
+    """
+    if not SKLEARN_AVAILABLE or catalog_df.empty or not candidate_docs:
+        return []
+
+    # 1. Anchor reads for taste profile
+    anchor_books = catalog_df[catalog_df["My Rating"] >= 4.0].copy()
+    if anchor_books.empty:
+        anchor_books = catalog_df[catalog_df["My Rating"] > 0].copy()
+    if anchor_books.empty:
+        anchor_books = catalog_df.copy()
+
+    # 2. Language + dedup guards (same rules as heuristic)
+    allowed_langs, _ = detect_catalog_languages(catalog_df)
+    read_titles = set(clean_book_title(t) for t in catalog_df["Title"].dropna())
+    read_keys = (
+        set(str(k).strip() for k in catalog_df["ol_key"].dropna().unique())
+        if "ol_key" in catalog_df.columns
+        else set()
+    )
+    read_author_to_titles: Dict[str, set] = {}
+    for _, r in catalog_df.iterrows():
+        a = str(r.get("Author") or "").strip().lower()
+        t_clean = clean_book_title(str(r.get("Title") or ""))
+        if a and t_clean:
+            read_author_to_titles.setdefault(a, set()).add(t_clean)
+
+    # Era profile for contemporary reader filter
+    year_col = (
+        "Original Publication Year"
+        if "Original Publication Year" in catalog_df.columns
+        else ("Year Published" if "Year Published" in catalog_df.columns else None)
+    )
+    valid_years = (
+        pd.to_numeric(catalog_df[year_col], errors="coerce").dropna()
+        if year_col
+        else pd.Series(dtype=float)
+    )
+    valid_years = valid_years[(valid_years >= 1500) & (valid_years <= 2035)]
+    if len(valid_years) >= 3:
+        target_era = float(valid_years.median())
+        min_user_year = float(valid_years.min())
+        is_contemporary_reader = target_era >= 1995 and min_user_year >= 1960
+    else:
+        target_era = 2020.0
+        is_contemporary_reader = True
+
+    # 3. Build catalog feature soups
+    cat_copy = catalog_df.copy()
+    cat_copy["feature_soup"] = cat_copy.apply(lambda r: build_feature_soup(r.to_dict()), axis=1)
+    anchor_books = anchor_books.copy()
+    anchor_books["feature_soup"] = anchor_books.apply(
+        lambda r: build_feature_soup(r.to_dict()), axis=1
+    )
+
+    # 4. Filter and shape candidates into records
+    seen_titles = set(read_titles)
+    seen_keys = set(read_keys)
+    cand_records: List[Dict] = []
+
+    for doc in candidate_docs:
+        raw_title = doc.get("title", "Unknown Title")
+        c_title = clean_book_title(raw_title)
+        doc_key = str(doc.get("key") or "").strip()
+
+        if not c_title or c_title in seen_titles or (doc_key and doc_key in seen_keys):
+            continue
+        allowed, is_trans = check_title_and_translation(
+            raw_title, doc.get("language"), allowed_languages=allowed_langs
+        )
+        if not allowed:
+            continue
+
+        auth_list = doc.get("author_name") or []
+        cand_auth = auth_list[0].strip().lower() if auth_list else (doc.get("author") or "").strip().lower()
+        if cand_auth in read_author_to_titles:
+            if any(
+                c_title in r_t or r_t in c_title
+                for r_t in read_author_to_titles[cand_auth]
+            ):
+                continue
+
+        cand_year = doc.get("year") or doc.get("first_publish_year")
+        if is_contemporary_reader and cand_year:
+            try:
+                if float(cand_year) < 1960:
+                    continue
+            except (ValueError, TypeError):
+                pass
+
+        seen_titles.add(c_title)
+        if doc_key:
+            seen_keys.add(doc_key)
+
+        subs = doc.get("subjects") or doc.get("subject") or []
+        genres_str = (
+            ", ".join(str(s) for s in subs[:8])
+            if isinstance(subs, list)
+            else str(subs)
+        )
+
+        cand_records.append({
+            "key": doc.get("key"),
+            "title": raw_title,
+            "Title": raw_title,
+            "author": doc.get("author") or (auth_list[0] if auth_list else "Unknown Author"),
+            "Author": doc.get("author") or (auth_list[0] if auth_list else "Unknown Author"),
+            "genres": genres_str,
+            "year": cand_year,
+            "Original Publication Year": cand_year,
+            "Year Published": cand_year,
+            "pages": doc.get("pages"),
+            "ratings_avg": doc.get("ratings_avg", 0.0),
+            "ratings_cnt": doc.get("ratings_cnt", 0),
+            "subjects": subs,
+            "cover_url": doc.get("cover_url"),
+            "is_nonfiction": doc.get("is_nonfiction", False),
+            "is_translation": is_trans,
+            # Sub-scores preserved from heuristic pass for pick_reason logic
+            "subject_fit": doc.get("subject_fit", 0.5),
+            "author_bonus": doc.get("author_bonus", 0.0),
+            "length_fit": doc.get("length_fit", 0.5),
+        })
+
+    if not cand_records:
+        return []
+
+    candidate_df = pd.DataFrame(cand_records)
+    candidate_df["feature_soup"] = candidate_df.apply(
+        lambda r: build_feature_soup(r.to_dict()), axis=1
+    )
+
+    # 5. Shared TF-IDF vocabulary over catalog + candidates
+    all_soups = pd.concat(
+        [cat_copy["feature_soup"], candidate_df["feature_soup"]], ignore_index=True
+    )
+    shared_tfidf = TfidfVectorizer(
+        stop_words="english", ngram_range=(1, 2), min_df=1, max_features=5000
+    )
+    shared_tfidf.fit(all_soups)
+
+    # 6. Rating-weighted user taste vector
+    anchor_vecs = shared_tfidf.transform(anchor_books["feature_soup"])
+    weights = anchor_books["My Rating"].fillna(3.0).values.reshape(-1, 1)
+    user_taste_vec = np.asarray(
+        anchor_vecs.multiply(weights).sum(axis=0)
+    ) / (weights.sum() + 1e-6)
+
+    # 7. k-NN on candidate pool
+    cand_vecs = shared_tfidf.transform(candidate_df["feature_soup"])
+    n_neighbors = min(max_picks + 10, len(candidate_df))
+    knn = NearestNeighbors(n_neighbors=n_neighbors, metric="cosine", algorithm="brute")
+    knn.fit(cand_vecs)
+    dists, idxs = knn.kneighbors(user_taste_vec)
+
+    # 8. Scale cosine similarity to taste_match % (75-98 range)
+    raw_sims = [max(0.0, 1.0 - d) for d in dists[0]]
+    s_min, s_max = min(raw_sims), max(raw_sims)
+    spread = (s_max - s_min) if (s_max - s_min) > 0 else 1.0
+
+    results: List[Dict] = []
+    for dist, idx in zip(dists[0], idxs[0]):
+        rec = dict(cand_records[idx])
+        raw_sim = max(0.0, 1.0 - dist)
+        rec["score"] = raw_sim
+        rec["taste_match"] = round(75.0 + ((raw_sim - s_min) / spread) * 23.0, 1)
+        results.append(rec)
+
+    return results
+
+
+def fetch_knn_candidates(catalog_df: pd.DataFrame) -> (List[Dict], bool):
+    """
+    Fetches candidates from Open Library using the same pipeline as the heuristic
+    model, then re-ranks them with the k-NN cosine similarity engine.
+
+    Falls back to heuristic scoring if scikit-learn is unavailable.
+    Candidate sourcing is identical to the heuristic — only the ranker changes —
+    so the A/B comparison is between scoring methods, not candidate pools.
+    """
+    if not SKLEARN_AVAILABLE:
+        return fetch_scored_candidates(catalog_df)
+
+    # Step 1: Harvest and filter candidates via the existing heuristic pipeline
+    heuristic_scored, has_nonfic = fetch_scored_candidates(catalog_df)
+    if not heuristic_scored:
+        return [], False
+
+    # Step 2: Re-rank with k-NN (candidate dicts already have all required fields)
+    knn_results = generate_knn_recommendations(
+        catalog_df,
+        candidate_docs=heuristic_scored,
+        max_picks=30,
+    )
+
+    if not knn_results:
+        return heuristic_scored, has_nonfic   # graceful fallback
+
+    return knn_results, has_nonfic
+
+
+
 def fetch_scored_candidates(catalog_df: pd.DataFrame) -> (List[Dict[str, object]], bool):
     if catalog_df.empty:
         return [], False
@@ -2037,7 +2306,10 @@ def render_recommendations_section(catalog_df: pd.DataFrame):
         with col_c:
             if st.button("Discover Your NextChapter 🎯", type="primary", key="btn_fetch_recs"):
                 with st.spinner("Analyzing your reading profile and sourcing recommendations..."):
-                    scored_pool, has_nonfic = fetch_scored_candidates(catalog_df)
+                    if CURRENT_MODEL == "knn" and SKLEARN_AVAILABLE:
+                        scored_pool, has_nonfic = fetch_knn_candidates(catalog_df)
+                    else:
+                        scored_pool, has_nonfic = fetch_scored_candidates(catalog_df)
                     st.session_state["scored_candidates"] = scored_pool
                     st.session_state["has_nonfiction_anchor"] = has_nonfic
                     picks = select_diverse_recommendations(
@@ -2088,7 +2360,10 @@ def render_recommendations_section(catalog_df: pd.DataFrame):
             if st.button("🔄 Refresh Recommendations", type="secondary", key="btn_refresh_recs"):
                 scored_pool = st.session_state.get("scored_candidates", [])
                 if not scored_pool:
-                    scored_pool, has_nonfic = fetch_scored_candidates(catalog_df)
+                    if CURRENT_MODEL == "knn" and SKLEARN_AVAILABLE:
+                        scored_pool, has_nonfic = fetch_knn_candidates(catalog_df)
+                    else:
+                        scored_pool, has_nonfic = fetch_scored_candidates(catalog_df)
                     st.session_state["scored_candidates"] = scored_pool
                     st.session_state["has_nonfiction_anchor"] = has_nonfic
                 seen = st.session_state.get("seen_recommendation_titles", set())
