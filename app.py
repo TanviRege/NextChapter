@@ -14,6 +14,7 @@ import threading
 import time
 from PIL import Image, ImageDraw, ImageFont
 from typing import Dict, Optional, Union, List, Set, Tuple
+from difflib import SequenceMatcher
 try:
     import numpy as np
     from sklearn.feature_extraction.text import TfidfVectorizer
@@ -1350,13 +1351,95 @@ def is_children_book(subjects: list) -> bool:
 
 
 def clean_book_title(title: str) -> str:
+    """
+    Normalizes a book title for robust matching across catalog and Open Library editions.
+    Handles accents, subtitle delimiters (:, ;, -, en-dash, em-dash, slashes, brackets),
+    ampersands, and leading articles ('the', 'a', 'an').
+    """
     if not title or not isinstance(title, str):
         return ""
-    base = re.split(r" - | \(|: | by ", title, flags=re.IGNORECASE)[0].strip()
-    nfkd = unicodedata.normalize("NFKD", base)
+    nfkd = unicodedata.normalize("NFKD", str(title))
     no_accents = "".join(c for c in nfkd if not unicodedata.combining(c))
-    clean = re.sub(r"[^\w\s]", "", no_accents).lower()
+    # Cut off at subtitle delimiters, series indicators, brackets, or author suffixes
+    base = re.split(
+        r"\s*[:;–—/]\s*|\s+-\s+|\s*\(|\s*\[|,\s*a novel|,\s*novel|\s+by\s+",
+        no_accents,
+        flags=re.IGNORECASE,
+    )[0].strip()
+    base = re.sub(r"\s*&\s*", " and ", base)
+    clean = re.sub(r"[^\w\s]", "", base).lower()
+    clean = re.sub(r"^(the|a|an)\s+", "", clean)
     return re.sub(r"\s+", " ", clean).strip()
+
+
+def author_tokens(author: str) -> Set[str]:
+    """Tokenize author name into normalized lowercase words for order-independent matching."""
+    if not author:
+        return set()
+    nfkd = unicodedata.normalize("NFKD", str(author))
+    no_accents = "".join(c for c in nfkd if not unicodedata.combining(c)).lower()
+    cleaned = re.sub(r"[^\w\s]", " ", no_accents)
+    return set(w for w in cleaned.split() if len(w) > 0)
+
+
+def is_book_in_catalog(cand_title: str, cand_author: str, cand_key: Optional[str], catalog_df: pd.DataFrame) -> bool:
+    """
+    Airtight check to determine if a candidate book has already been read by the user.
+    Checks:
+      1. Open Library Work key match.
+      2. Normalized clean title match (subtitle, accents, ampersands, leading articles stripped).
+      3. Substring containment between candidate and user titles when authors align.
+      4. High fuzzy title similarity (SequenceMatcher >= 0.82) when authors align.
+    """
+    if catalog_df is None or catalog_df.empty:
+        return False
+
+    if cand_key and "ol_key" in catalog_df.columns:
+        clean_k = str(cand_key).strip()
+        if clean_k and clean_k in set(catalog_df["ol_key"].dropna().astype(str).str.strip()):
+            return True
+
+    c_norm = clean_book_title(cand_title)
+    if not c_norm:
+        return True  # Invalid title -> discard
+
+    cand_auth_tokens = author_tokens(cand_author)
+
+    for _, row in catalog_df.iterrows():
+        u_raw_t = str(row.get("Title") or "")
+        u_norm = clean_book_title(u_raw_t)
+        if not u_norm:
+            continue
+
+        # Check 2: Clean title exact match
+        if c_norm == u_norm:
+            return True
+
+        u_raw_a = str(row.get("Author") or "")
+        u_auth_tokens = author_tokens(u_raw_a)
+
+        # Author matching (order-independent, e.g. "Hannah, Kristin" vs "Kristin Hannah")
+        auth_match = False
+        if cand_auth_tokens and u_auth_tokens:
+            cand_long = {w for w in cand_auth_tokens if len(w) > 2}
+            u_long = {w for w in u_auth_tokens if len(w) > 2}
+            if cand_long and u_long:
+                auth_match = bool(cand_long & u_long)
+            else:
+                auth_match = bool(cand_auth_tokens & u_auth_tokens)
+        else:
+            auth_match = True  # Can't rule out if author is missing
+
+        # Check 3: Substring containment (e.g. "four winds" in "four winds novel")
+        if (u_norm in c_norm or c_norm in u_norm) and (auth_match or len(u_norm) >= 8 or len(c_norm) >= 8):
+            return True
+
+        # Check 4: High fuzzy match if authors match
+        if auth_match and len(c_norm) >= 6 and len(u_norm) >= 6:
+            if SequenceMatcher(None, c_norm, u_norm).ratio() >= 0.82:
+                return True
+
+    return False
 
 
 def calculate_length_fit(pages: Optional[float], p25: float = 300.0, p75: float = 500.0) -> float:
@@ -1747,22 +1830,21 @@ def generate_knn_recommendations(
         c_title = clean_book_title(raw_title)
         doc_key = str(doc.get("key") or "").strip()
 
+        auth_list = doc.get("author_name") or []
+        cand_auth = doc.get("author") or (auth_list[0] if auth_list else "Unknown Author")
+
         if not c_title or c_title in seen_titles or (doc_key and doc_key in seen_keys):
             continue
+
+        # Foolproof catalog deduplication check
+        if is_book_in_catalog(raw_title, cand_auth, doc_key, catalog_df):
+            continue
+
         allowed, is_trans = check_title_and_translation(
             raw_title, doc.get("language"), allowed_languages=allowed_langs
         )
         if not allowed:
             continue
-
-        auth_list = doc.get("author_name") or []
-        cand_auth = auth_list[0].strip().lower() if auth_list else (doc.get("author") or "").strip().lower()
-        if cand_auth in read_author_to_titles:
-            if any(
-                c_title in r_t or r_t in c_title
-                for r_t in read_author_to_titles[cand_auth]
-            ):
-                continue
 
         cand_year = doc.get("year") or doc.get("first_publish_year")
         if is_contemporary_reader and cand_year:
@@ -1983,18 +2065,21 @@ def fetch_scored_candidates(catalog_df: pd.DataFrame) -> (List[Dict[str, object]
         t = doc.get("title")
         c_title = clean_book_title(t)
         doc_key = str(doc.get("key") or "").strip()
+        auth_list = doc.get("author_name") or []
+        cand_auth = auth_list[0].strip() if auth_list else (doc.get("author") or "")
+
         if not c_title or c_title in seen_titles or (doc_key and doc_key in seen_keys):
             return False
+
+        # Foolproof catalog deduplication check
+        if is_book_in_catalog(t, cand_auth, doc_key, catalog_df):
+            return False
+
         allowed, is_trans = check_title_and_translation(t, doc.get("language"), allowed_languages=allowed_langs)
         if not allowed:
             return False
         if not reads_children and is_children_book(doc.get("subject", [])):
             return False
-        auth_list = doc.get("author_name") or []
-        cand_auth = auth_list[0].strip().lower() if auth_list else ""
-        if cand_auth in read_author_to_titles:
-            if any(c_title in r_t or r_t in c_title for r_t in read_author_to_titles[cand_auth]):
-                return False
         seen_titles.add(c_title)
         if doc_key:
             seen_keys.add(doc_key)
@@ -2204,6 +2289,7 @@ def select_diverse_recommendations(
     exclude_titles: Optional[set] = None,
     max_picks: int = 5,
     reserve_nonfiction: bool = False,
+    catalog_df: Optional[pd.DataFrame] = None,
 ) -> List[Dict[str, object]]:
     if not scored_pool:
         return []
@@ -2245,6 +2331,9 @@ def select_diverse_recommendations(
                 c_title = clean_book_title(cand["title"])
                 if c_title in exclude_titles:
                     continue
+                if catalog_df is not None and not catalog_df.empty:
+                    if is_book_in_catalog(cand.get("title", ""), cand.get("author", ""), cand.get("key"), catalog_df):
+                        continue
                 cand_copy = dict(cand)
                 top_s = get_primary_subject(cand)
                 cand_copy["pick_reason"] = assign_pick_reason(cand_copy, top_s)
@@ -2261,6 +2350,10 @@ def select_diverse_recommendations(
         c_title = clean_book_title(cand["title"])
         if c_title in exclude_titles or any(clean_book_title(p["title"]) == c_title for p in picks):
             continue
+
+        if catalog_df is not None and not catalog_df.empty:
+            if is_book_in_catalog(cand.get("title", ""), cand.get("author", ""), cand.get("key"), catalog_df):
+                continue
 
         top_s = get_primary_subject(cand)
         auth = cand["author"].lower()
@@ -2317,6 +2410,7 @@ def render_recommendations_section(catalog_df: pd.DataFrame):
                         exclude_titles=set(),
                         max_picks=5,
                         reserve_nonfiction=has_nonfic,
+                        catalog_df=catalog_df,
                     )
                     st.session_state["recommendations"] = picks
                     st.session_state["seen_recommendation_titles"] = {clean_book_title(p["title"]) for p in picks}
@@ -2372,6 +2466,7 @@ def render_recommendations_section(catalog_df: pd.DataFrame):
                     exclude_titles=seen,
                     max_picks=5,
                     reserve_nonfiction=False,
+                    catalog_df=catalog_df,
                 )
                 if next_picks:
                     st.session_state["recommendations"] = next_picks
