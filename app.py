@@ -2404,32 +2404,23 @@ def render_recommendations_section(catalog_df: pd.DataFrame):
             with st.container(border=True):
                 if b.get("cover_url"):
                     st.markdown(
-                        f"""<div style="text-align: center; margin-bottom: 8px;">
-                            <img src="{b['cover_url']}" style="width: 100%; height: 165px; object-fit: cover; border-radius: 8px; box-shadow: 0 4px 10px rgba(0,0,0,0.3);" />
-                        </div>""",
+                        f'<div style="text-align: center; margin-bottom: 8px;"><img src="{b["cover_url"]}" style="width: 100%; height: 165px; object-fit: cover; border-radius: 8px; box-shadow: 0 4px 10px rgba(0,0,0,0.3);" /></div>',
                         unsafe_allow_html=True,
                     )
                 else:
                     st.markdown(
-                        """<div style="height: 165px; background: #23232c; border-radius: 8px; display: flex; align-items: center; justify-content: center; color: #888; font-size: 11px; margin-bottom: 8px;">No Cover</div>""",
+                        '<div style="height: 165px; background: #23232c; border-radius: 8px; display: flex; align-items: center; justify-content: center; color: #888; font-size: 11px; margin-bottom: 8px;">No Cover</div>',
                         unsafe_allow_html=True,
                     )
 
                 trans_badge = (
-                    """<div style="background: rgba(16, 185, 129, 0.15); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.35); font-size: 9px; font-weight: 700; padding: 2px 6px; border-radius: 999px; display: inline-block; margin-left: 4px; margin-bottom: 6px;">
-                        🌐 English Translation
-                    </div>"""
+                    '<div style="background: rgba(16, 185, 129, 0.15); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.35); font-size: 9px; font-weight: 700; padding: 2px 6px; border-radius: 999px; display: inline-block; margin-left: 4px;">🌐 English Translation</div>'
                     if b.get("is_translation")
                     else ""
                 )
 
                 st.markdown(
-                    f"""<div style="display: flex; align-items: center; flex-wrap: wrap; gap: 4px; margin-bottom: 6px;">
-                        <div style="background: #2563EB; color: #ffffff; font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 999px; display: inline-block;">
-                            {b['taste_match']}% MATCH
-                        </div>
-                        {trans_badge}
-                    </div>""",
+                    f'<div style="display: flex; align-items: center; flex-wrap: wrap; gap: 4px; margin-bottom: 6px;"><div style="background: #2563EB; color: #ffffff; font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 999px; display: inline-block;">{b["taste_match"]}% MATCH</div>{trans_badge}</div>',
                     unsafe_allow_html=True,
                 )
 
@@ -2444,11 +2435,7 @@ def render_recommendations_section(catalog_df: pd.DataFrame):
                 st.markdown(f"<div style='font-size: 11px; color: #93c5fd; font-style: italic; min-height: 40px; margin-bottom: 4px;'>💡 {b.get('pick_reason', '')}</div>", unsafe_allow_html=True)
 
                 st.markdown(
-                    f"""<div style="margin: 4px 0 10px 0;">
-                        <a href="{ol_url}" target="_blank" style="display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 600; color: #60A5FA; text-decoration: none; padding: 3px 8px; background: rgba(59, 130, 246, 0.12); border: 1px solid rgba(59, 130, 246, 0.3); border-radius: 6px;">
-                            <span>📖</span> Read Synopsis ↗
-                        </a>
-                    </div>""",
+                    f'<div style="margin: 4px 0 10px 0;"><a href="{ol_url}" target="_blank" style="display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 600; color: #60A5FA; text-decoration: none; padding: 3px 8px; background: rgba(59, 130, 246, 0.12); border: 1px solid rgba(59, 130, 246, 0.3); border-radius: 6px;">📖 Read Synopsis ↗</a></div>',
                     unsafe_allow_html=True,
                 )
 
