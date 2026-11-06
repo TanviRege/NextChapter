@@ -1086,9 +1086,6 @@ def render_wrapped_section(stats: Dict[str, object]):
     render_safe_html(
         """
         <div style="text-align: center; margin: 35px 0 25px 0;">
-            <div style="display: inline-block; padding: 6px 18px; background: #2563EB; color: #ffffff; font-size: 13px; font-weight: 800; border-radius: 999px; letter-spacing: 1.5px; margin-bottom: 8px;">
-                ANNUAL RECAP
-            </div>
             <h2 style="font-size: 2.3rem; font-weight: 800; margin: 0; color: inherit;">
                 Your Reading Wrapped!
             </h2>
@@ -2380,9 +2377,6 @@ def render_recommendations_section(catalog_df: pd.DataFrame):
     st.markdown(
         """
         <div style="text-align: center; margin: 40px 0 20px 0;">
-            <div style="display: inline-block; padding: 6px 18px; background: #2563EB; color: #ffffff; font-size: 13px; font-weight: 800; border-radius: 999px; letter-spacing: 1.5px; margin-bottom: 8px;">
-                RECOMMENDATIONS
-            </div>
             <h2 style="font-size: 2.1rem; font-weight: 800; margin: 0; color: inherit;">
                 So, what's your NextChapter? 🎯
             </h2>
