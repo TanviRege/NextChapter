@@ -1973,7 +1973,27 @@ def fetch_scored_candidates(catalog_df: pd.DataFrame) -> (List[Dict[str, object]
     if anchor_books.empty:
         anchor_books = catalog_df.copy()
 
-    affinity_authors = set(anchor_books["Author"].dropna().str.strip().str.lower())
+    # Rank favorite authors deterministically by mean rating, book count, and catalog order
+    valid_anchor_authors = anchor_books[anchor_books["Author"].notna()].copy()
+    if not valid_anchor_authors.empty:
+        valid_anchor_authors["clean_author"] = valid_anchor_authors["Author"].astype(str).str.strip()
+        valid_anchor_authors = valid_anchor_authors[valid_anchor_authors["clean_author"] != ""]
+    
+    if not valid_anchor_authors.empty:
+        author_stats = (
+            valid_anchor_authors.groupby("clean_author")
+            .agg(
+                avg_rating=("My Rating", "mean"),
+                book_count=("Title", "count"),
+                first_idx=("Title", lambda s: s.index[0]),
+            )
+            .sort_values(by=["avg_rating", "book_count", "first_idx"], ascending=[False, False, True])
+        )
+        anchor_author_list = author_stats.index.tolist()
+    else:
+        anchor_author_list = []
+
+    affinity_authors = set(a.lower() for a in anchor_author_list)
 
     subject_scores = {}
     for _, row in catalog_df.iterrows():
@@ -2108,15 +2128,14 @@ def fetch_scored_candidates(catalog_df: pd.DataFrame) -> (List[Dict[str, object]
         except Exception:
             pass
 
-    # Primary Pass 2: Favorite anchor authors (up to 3)
-    anchor_author_list = list(affinity_authors)
-    for auth in anchor_author_list[:3]:
+    # Primary Pass 2: Favorite anchor authors (up to 6 authors, 6 books each for balanced distribution)
+    for auth in anchor_author_list[:6]:
         url = "https://openlibrary.org/search.json"
         query_str = f'author:"{auth}" {lang_query}'.strip()
         params = {
             "q": query_str,
             "sort": "readinglog",
-            "limit": 12,
+            "limit": 6,
             "fields": "key,title,author_name,first_publish_year,number_of_pages_median,ratings_average,ratings_count,subject,cover_i,language",
         }
         try:
@@ -2151,7 +2170,7 @@ def fetch_scored_candidates(catalog_df: pd.DataFrame) -> (List[Dict[str, object]
     TARGET_MIN_CANDIDATES = 25
     if len(candidates) < TARGET_MIN_CANDIDATES:
         # Repopulation Step A: Query remaining anchor authors
-        for auth in anchor_author_list[3:]:
+        for auth in anchor_author_list[6:]:
             if len(candidates) >= TARGET_MIN_CANDIDATES:
                 break
             url = "https://openlibrary.org/search.json"
@@ -2322,48 +2341,75 @@ def select_diverse_recommendations(
     subject_counts = {}
     author_counts = {}
 
+    def candidate_is_valid(cand) -> bool:
+        c_title = clean_book_title(cand.get("title", ""))
+        if not c_title or c_title in exclude_titles or any(clean_book_title(p["title"]) == c_title for p in picks):
+            return False
+        if catalog_df is not None and not catalog_df.empty:
+            if is_book_in_catalog(cand.get("title", ""), cand.get("author", ""), cand.get("key"), catalog_df):
+                return False
+        return True
+
     if reserve_nonfiction:
         for cand in scored_pool:
             if cand.get("is_nonfiction", False):
-                c_title = clean_book_title(cand["title"])
-                if c_title in exclude_titles:
+                if not candidate_is_valid(cand):
                     continue
-                if catalog_df is not None and not catalog_df.empty:
-                    if is_book_in_catalog(cand.get("title", ""), cand.get("author", ""), cand.get("key"), catalog_df):
-                        continue
                 cand_copy = dict(cand)
                 top_s = get_primary_subject(cand)
                 cand_copy["pick_reason"] = assign_pick_reason(cand_copy, top_s)
                 picks.append(cand_copy)
-                auth = cand["author"].lower()
+                auth = str(cand.get("author") or "Unknown Author").strip().lower()
                 subject_counts[top_s] = 1
                 author_counts[auth] = 1
                 break
 
+    # Pass 1: Strict author diversity (max 1 book per author, max 2 per subject)
     for cand in scored_pool:
         if len(picks) >= max_picks:
             break
-
-        c_title = clean_book_title(cand["title"])
-        if c_title in exclude_titles or any(clean_book_title(p["title"]) == c_title for p in picks):
+        if not candidate_is_valid(cand):
             continue
-
-        if catalog_df is not None and not catalog_df.empty:
-            if is_book_in_catalog(cand.get("title", ""), cand.get("author", ""), cand.get("key"), catalog_df):
-                continue
 
         top_s = get_primary_subject(cand)
-        auth = cand["author"].lower()
+        auth = str(cand.get("author") or "Unknown Author").strip().lower()
 
-        if subject_counts.get(top_s, 0) >= 2 or author_counts.get(auth, 0) >= 2:
-            continue
+        if author_counts.get(auth, 0) < 1 and subject_counts.get(top_s, 0) < 2:
+            cand_copy = dict(cand)
+            cand_copy["pick_reason"] = assign_pick_reason(cand_copy, top_s)
+            picks.append(cand_copy)
+            subject_counts[top_s] = subject_counts.get(top_s, 0) + 1
+            author_counts[auth] = author_counts.get(auth, 0) + 1
 
-        cand_copy = dict(cand)
-        cand_copy["pick_reason"] = assign_pick_reason(cand_copy, top_s)
-        picks.append(cand_copy)
+    # Pass 2: Relaxed author cap (up to 2 books per author, max 2 per subject)
+    if len(picks) < max_picks:
+        for cand in scored_pool:
+            if len(picks) >= max_picks:
+                break
+            if not candidate_is_valid(cand):
+                continue
 
-        subject_counts[top_s] = subject_counts.get(top_s, 0) + 1
-        author_counts[auth] = author_counts.get(auth, 0) + 1
+            top_s = get_primary_subject(cand)
+            auth = str(cand.get("author") or "Unknown Author").strip().lower()
+
+            if author_counts.get(auth, 0) < 2 and subject_counts.get(top_s, 0) < 2:
+                cand_copy = dict(cand)
+                cand_copy["pick_reason"] = assign_pick_reason(cand_copy, top_s)
+                picks.append(cand_copy)
+                subject_counts[top_s] = subject_counts.get(top_s, 0) + 1
+                author_counts[auth] = author_counts.get(auth, 0) + 1
+
+    # Pass 3: Fill remaining slots if candidate pool is very small
+    if len(picks) < max_picks:
+        for cand in scored_pool:
+            if len(picks) >= max_picks:
+                break
+            if not candidate_is_valid(cand):
+                continue
+            cand_copy = dict(cand)
+            top_s = get_primary_subject(cand)
+            cand_copy["pick_reason"] = assign_pick_reason(cand_copy, top_s)
+            picks.append(cand_copy)
 
     return picks
 
