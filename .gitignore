@@ -223,3 +223,12 @@ __marimo__/
 *.db
 *.sqlite3
 evaluation_results.json
+
+# OS files
+.DS_Store
+
+# Local feedback data and private samples
+NextChapter Feedback.xlsx
+goodreads-export-sample.csv
+RECOMMENDER_REVISION_GUIDE.md
+
