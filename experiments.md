@@ -21,8 +21,8 @@
 | **Algorithm** | 4-pillar weighted formula | TF-IDF cosine similarity + k-NN |
 | **Scoring pillars** | subject fit (55%), author bonus (20%), community (15%), length fit (10%) | Rating-weighted user taste vector ranked by cosine distance |
 | **Era awareness** | ❌ None | ✅ Era bucket tokens in feature soup |
-| **Language filtering** | ✅ Strict English / dynamic multi-language | ✅ Same (identical candidate pipeline) |
-| **Candidate source** | Open Library Search API | Open Library Search API (identical) |
+| **Language filtering** | English / foreign works translated to English | English / foreign works translated to English |
+| **Candidate source** | Open Library Search API | Open Library Search API |
 | **Live from** | Project start → 2026-11-02 | 2026-11-02 → 2026-11-11 |
 
 ---
@@ -52,10 +52,10 @@ A higher interested rate on k-NN than heuristic supports H1.
 
 ---
 
-### Target Sample Size
+### Sample Size
 
-- **Model A (heuristic):** 95 rows collected ✅ (7 friends, collected before 2026-11-02)
-- **Model B (k-NN):** Target ≥ 95 rows from the same 7 friends
+- **Model A (heuristic):** 95 rows collected from 7 friends (collected before 2026-11-02)
+- **Model B (k-NN):** 87 rows collected from the same 7 friends (collected after 2026-11-02)
 
 ---
 
