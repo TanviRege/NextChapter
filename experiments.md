@@ -65,8 +65,8 @@ A higher interested rate on k-NN than heuristic supports H1.
 
 This is **not** a randomised between-subjects design. Known confounds:
 
-1. **Order effect** — heuristic always came first. Users may be more engaged on first use (novelty) or more discerning on repeat use (familiarity). This can bias results in either direction.
-2. **Familiarity bias** — returning users know what the app does and may interact more deliberately the second time.
+1. **Order effect:** The heuristic always ran first. Users may be more engaged on first use (novelty) or more critical on repeat use (familiarity). This can bias results in either direction.
+2. **Familiarity bias:** Returning users know what the app does and may interact more deliberately the second time.
 
 **Mitigation:** Participants were asked to use the same Goodreads export or reading list in the second session to avoid a change in the inputted ratings/taste.
 

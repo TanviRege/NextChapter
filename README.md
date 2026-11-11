@@ -8,55 +8,48 @@ A personalized book recommendation and reading telemetry app built with Python a
 
 ## Recommender Evaluation & The Holdout Paradox
 
-To evaluate recommendation quality, I initially implemented a textbook **Leave-One-Out holdout test** across 37 highly rated (4.0+) books by sequentially hiding one favorite book, rebuilding the user taste profile without it, and checking if the engine recovered the hidden title in its top 5 picks (**Recall@5**).
+To evaluate recommendation quality, I initially ran a standard **Leave-One-Out holdout test** across 37 highly rated (4.0+) books. This involved hiding one favorite book at a time, rebuilding the taste profile without it, and checking if the app recommended that book back in the top 5 picks (**Recall@5**).
 
-The test yielded **0% Recall@5**, which highlighted three key dynamics in open-catalog discovery:
+The test returned **0% Recall@5**, which surfaced three interesting dynamics in open-catalog discovery:
 
-1. **Sample Size & Generalizability ($n=37, N=1$):** A single user's reading history of 37 books offers a **directional case study**, not statistical proof. At this sample size, individual quirks in one person's catalog disproportionately skew aggregate percentages.
-2. **The Incomplete Ground Truth Problem:** In an open catalog with millions of titles (Open Library), hiding one book does not make it the *only* valid recommendation. In fact, **3 of the 5 books recommended during the test were titles the reader had already read and loved in prior years** (a 60% real-world hit rate)—yet the offline test penalized them as false positives.
-3. **The Outlier Erasure Trap:** Hiding a standalone, high-rated book in a genre (e.g., the reader's single historical novel) erased the only evidence of that latent interest. The engine correctly recommended books matching the remaining profile, which mathematically ensured the hidden book would miss.
+1. **Small sample size:** A single person's reading history of 37 books is a useful case study, but individual quirks (like having read mostly one genre) can skew the results significantly.
+2. **The incomplete ground truth problem:** In an open catalog with millions of titles, hiding one book does not make it the *only* valid recommendation. In fact, **3 of the 5 books recommended during the test were titles the reader had already read and loved** (a 60% real-world hit rate), but the test still penalized these as failures.
+3. **The outlier erasure trap:** Hiding a one-off, high-rated book in a niche genre (e.g., the reader's only historical novel) erased the only signal the app had for that interest. Naturally, it then recommended books based on everything else the reader liked, which mathematically guaranteed the hidden book would not appear.
 
-> **Takeaway:** While offline Recall@K works well on small, closed-world benchmark datasets (like MovieLens), open-web discovery engines require **online evaluation**.
+> **Takeaway:** Offline holdout tests work well on clean, closed benchmark datasets, but open-catalog discovery apps need live evaluation with real users.
 
-NextChapter tracks this through persistent user events in SQLite (`feedback.db`), measuring true **Precision** via active reader interactions:
-- **"⭐ Interested!"** (positive intent / latent interest)
-- **"I've Read This!"** (prior affinity verification)
-
-This captures genuine taste alignment in a massive candidate pool rather than penalizing serendipitous or previously validated discoveries.
+NextChapter tracks this through user interactions saved to a database (`feedback.db`), measuring how readers respond to each recommendation:
+- **"⭐ Interested!"** — the book looks new and exciting
+- **"I've Read This!"** — the book is already known to the reader
 
 ---
 
-## Online A/B Experiment: Heuristic vs. Vector-Space k-NN
+## Online A/B Experiment: Rule-Based vs. Similarity-Based Recommendations
 
-To evaluate recommendation quality with real readers in production, I ran a pre-registered sequential A/B experiment across 7 active readers (182 total recommendation impressions logged) comparing two architectures:
+To test whether a smarter model could improve recommendations, I ran an A/B experiment with 7 readers (182 total recommendation impressions) comparing two approaches:
 
-- **Model A (Control — Heuristic):** A 4-pillar rule engine weighting subject affinity (55%), author bonus (20%), community popularity (15%), and book length fit (10%).
-- **Model B (Variant — k-NN):** A vector-space model utilizing TF-IDF representations over a composite feature soup (subjects, genres, publication era buckets, and author tokens) scored by cosine distance against a rating-weighted user taste vector.
+- **Model A (Rule-Based Heuristic):** Scores books using weighted rules: genre match (55%), author affinity (20%), community ratings (15%), and book length (10%).
+- **Model B (k-NN Similarity):** Builds a profile of the reader's tastes from their ratings, then finds books that are most similar to that profile across genre, topic, era, and author.
 
-Hypotheses and evaluation criteria were pre-registered in [`experiments.md`](experiments.md) prior to Model B data collection to preserve scientific integrity.
+The hypothesis and success criteria were written down in [`experiments.md`](experiments.md) *before* any Model B data was collected, to avoid drawing conclusions that fit the data after the fact.
 
-### Results & Findings
+### Results
 
-| Metric | Model A (Heuristic) | Model B (k-NN) | Delta / Shift |
+| Metric | Model A (Rule-Based) | Model B (k-NN) | Change |
 |---|---|---|---|
 | Recommendations Shown | 61 | 60 | — |
-| "Interested!" Actions | 19 | 20 | +1 |
-| "Already Read" Actions | 15 | 7 | -8 |
-| **Interested Rate (Primary Signal)** | **31.1%** (19/61) | **33.3%** (20/60) | **+2.2%** (+7.0% relative lift) |
-| **Already-Read Rate (Popularity Bias)** | **24.6%** (15/61) | **11.7%** (7/60) | **-12.9%** (**-52.5% relative drop**)* |
-| **Forward Discovery Share** | 55.9% (19/34) | **74.1%** (20/27) | **+18.2% quality shift** |
+| "Interested!" Clicks | 19 | 20 | +1 |
+| "Already Read" Clicks | 15 | 7 | -8 |
+| **Interest Rate (Primary)** | **31.1%** (19/61) | **33.3%** (20/60) | **+2.2%** |
+| **Already-Read Rate** | **24.6%** (15/61) | **11.7%** (7/60) | **-12.9%** (down 52.5%)* |
+| Share of clicks that were discoveries | 55.9% | **74.1%** | **+18.2%** |
 
-*\*Statistically significant at the 10% level ($\chi^2 = 3.40, p = 0.065$).*
+*\*Significant at the 10% level (χ² = 3.40, p = 0.065).*
 
 ![A/B Experiment Results](ab_experiment_results.png)
 
 ### Key Takeaways
 
-1. **Breaking the Popularity Echo Chamber:**
-   While Model B delivered a modest directional lift in reader interest (+2.2%), its critical breakthrough was **cutting the "already-read" failure mode by more than half (falling from 24.6% down to 11.7%)**. Hand-tuned heuristics suffered heavily from popularity bias—frequently surfacing mainstream bestsellers readers had already consumed. TF-IDF cosine similarity broke out of this popularity bubble, surfacing relevant yet undiscovered books.
-2. **Higher Engagement Quality:**
-   In Model A, 44% of all user clicks were retrospective recognition ("I've already read this"). In Model B, **74.1% of all feedback was forward-looking discovery intent ("Interested!")**, yielding 20 active reading discoveries across 53 novel candidates.
-3. **Engineering Realities:**
-   Beyond vector similarity, production discovery quality depended heavily on pipeline engineering: implementing fuzzy edition deduplication (`SequenceMatcher`), deterministic author ranking, and fair-share candidate harvesting across top-rated authors.
-
-Model B (k-NN) is deployed as the active recommendation engine in NextChapter. Full details and methodology are documented in [`experiments.md`](experiments.md).
+1. **The recommendation engine was recommending books readers had already read.** Nearly 1 in 4 recommendations shown by the rule-based model (24.6%) were books the reader had already finished. The similarity-based model more than halved this rate, down to 11.7%.
+2. **More of the engagement became meaningful.** In Model A, 44% of all reader clicks were "I've already read this." In Model B, **74.1% of clicks were "Interested!"** — meaning readers were genuinely discovering new books rather than just recognizing old ones.
+3. **Model B (k-NN) is the active engine in NextChapter.** Full experiment details are in [`experiments.md`](experiments.md).
