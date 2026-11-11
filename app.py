@@ -930,24 +930,48 @@ def render_safe_html(html_str: str):
 
 
 def generate_wrapped_poster_image(stats: Dict[str, object], archetype: str, archetype_desc: str) -> bytes:
-    """Generate a sleek high-res (920x840) reading recap poster image without emojis or truncated text."""
-    w, h = 920, 840
-    img = Image.new("RGB", (w, h), color=(15, 15, 20))
+    """Generate a sleek, modern reading recap poster image (920x800) with bold typography and Spotify-inspired cards."""
+    w, h = 920, 800
+    img = Image.new("RGB", (w, h), color=(15, 23, 42))  # Deep Slate 900
     draw = ImageDraw.Draw(img)
 
-    font_path = "/System/Library/Fonts/Supplemental/Arial.ttf"
-    if not os.path.exists(font_path):
-        font_path = "/System/Library/Fonts/Helvetica.ttc"
+    def get_poster_font(size: int, bold: bool = False):
+        bold_candidates = [
+            "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+            "/System/Library/Fonts/Supplemental/Trebuchet MS Bold.ttf",
+            "/System/Library/Fonts/Helvetica.ttc",
+            "/System/Library/Fonts/Avenir.ttc",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        ]
+        reg_candidates = [
+            "/System/Library/Fonts/Supplemental/Arial.ttf",
+            "/System/Library/Fonts/Supplemental/Trebuchet MS.ttf",
+            "/System/Library/Fonts/Helvetica.ttc",
+            "/System/Library/Fonts/Avenir.ttc",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        ]
+        candidates = bold_candidates if bold else reg_candidates
+        for p in candidates:
+            if os.path.exists(p):
+                try:
+                    return ImageFont.truetype(p, size)
+                except Exception:
+                    continue
+        try:
+            return ImageFont.load_default()
+        except Exception:
+            return None
 
-    try:
-        f_badge = ImageFont.truetype(font_path, 15)
-        f_title = ImageFont.truetype(font_path, 34)
-        f_sub = ImageFont.truetype(font_path, 16)
-        f_card_title = ImageFont.truetype(font_path, 13)
-        f_stat = ImageFont.truetype(font_path, 28)
-        f_desc = ImageFont.truetype(font_path, 14)
-    except Exception:
-        f_badge = f_title = f_sub = f_card_title = f_stat = f_desc = ImageFont.load_default()
+    f_hero_badge = get_poster_font(12, bold=True)
+    f_header_title = get_poster_font(34, bold=True)
+    f_header_sub = get_poster_font(15, bold=False)
+    f_badge = get_poster_font(11, bold=True)
+    f_stat = get_poster_font(36, bold=True)
+    f_sub_bold = get_poster_font(15, bold=True)
+    f_note = get_poster_font(13, bold=False)
+    f_footer = get_poster_font(13, bold=False)
 
     def clean_text_no_emojis(txt: str) -> str:
         """Strip all emojis and non-ASCII characters to guarantee clean font rendering without missing-glyph boxes."""
@@ -980,59 +1004,69 @@ def generate_wrapped_poster_image(stats: Dict[str, object], archetype: str, arch
         return lines
 
     # Header Card
-    draw.rounded_rectangle([(40, 28), (w - 40, 138)], radius=16, fill=(24, 24, 32), outline=(45, 45, 55), width=1)
-    draw.text((60, 46), "ANNUAL READING RECAP", font=f_badge, fill=(59, 130, 246))
-    draw.text((60, 68), "Your Reading Wrapped", font=f_title, fill=(255, 255, 255))
-    draw.text((60, 108), "Your Year in Books - Personalized Reading Stats", font=f_sub, fill=(180, 180, 190))
+    draw.rounded_rectangle([(40, 28), (w - 40, 142)], radius=18, fill=(30, 41, 59), outline=(51, 65, 85), width=1)
+    badge_txt = "ANNUAL READING RECAP"
+    badge_w = int(draw.textlength(badge_txt, font=f_hero_badge)) + 18
+    draw.rounded_rectangle([(60, 44), (60 + badge_w, 64)], radius=6, fill=(37, 99, 235))
+    draw.text((69, 47), badge_txt, font=f_hero_badge, fill=(255, 255, 255))
+    draw.text((60, 72), "Your Reading Wrapped", font=f_header_title, fill=(248, 250, 252))
+    draw.text((60, 112), "Your Year in Books • Personalized Reading Stats", font=f_header_sub, fill=(148, 163, 184))
 
-    def draw_panel(x1, y1, x2, y2, bg_color, badge, stat, subtitle, note):
-        draw.rounded_rectangle([(x1, y1), (x2, y2)], radius=18, fill=bg_color)
+    def draw_panel(x1, y1, x2, y2, bg_col, border_col, badge, stat, subtitle, note):
+        draw.rounded_rectangle([(x1, y1), (x2, y2)], radius=18, fill=bg_col, outline=border_col, width=1)
         px = x1 + 24
         max_w = (x2 - x1) - 48
 
-        # 1. Badge
-        draw.text((px, y1 + 16), clean_text_no_emojis(badge).upper(), font=f_card_title, fill=(255, 255, 255))
+        # Capsule pill badge
+        b_clean = clean_text_no_emojis(badge).upper()
+        bw = int(draw.textlength(b_clean, font=f_badge)) + 18
+        draw.rounded_rectangle([(px, y1 + 18), (px + bw, y1 + 38)], radius=10, fill=(0, 0, 0))
+        draw.text((px + 9, y1 + 21), b_clean, font=f_badge, fill=(255, 255, 255))
 
-        # 2. Big Stat
-        stat_clean = clean_text_no_emojis(stat)
-        draw.text((px, y1 + 38), stat_clean, font=f_stat, fill=(255, 255, 255))
+        # Big Stat
+        st_clean = clean_text_no_emojis(stat)
+        draw.text((px, y1 + 44), st_clean, font=f_stat, fill=(255, 255, 255))
 
-        # 3. Subtitle (wrapped to max 2 lines, no arbitrary slicing)
+        # Subtitle (15pt Bold, max 2 lines)
         sub_clean = clean_text_no_emojis(subtitle)
-        sub_lines = fit_text_lines(sub_clean, f_desc, max_w, max_lines=2)
-        y_sub = y1 + 76
-        for i, line in enumerate(sub_lines):
-            draw.text((px, y_sub + (i * 18)), line, font=f_desc, fill=(255, 255, 255))
+        sub_lines = fit_text_lines(sub_clean, f_sub_bold, max_w, max_lines=2)
+        y_sub = y1 + 92
+        for i, l in enumerate(sub_lines):
+            draw.text((px, y_sub + (i * 20)), l, font=f_sub_bold, fill=(248, 250, 252))
 
-        # 4. Note (wrapped cleanly, positioned below subtitle)
-        y_note = y_sub + (len(sub_lines) * 18) + 6
-        note_clean = clean_text_no_emojis(note)
-        note_lines = fit_text_lines(note_clean, f_card_title, max_w, max_lines=1 if len(sub_lines) > 1 else 2)
-        for i, line in enumerate(note_lines):
-            draw.text((px, y_note + (i * 16)), line, font=f_card_title, fill=(225, 225, 235))
+        # Note (13pt Regular, max 1 line)
+        y_note = y_sub + (len(sub_lines) * 20) + 4
+        n_clean = clean_text_no_emojis(note)
+        n_lines = fit_text_lines(n_clean, f_note, max_w, max_lines=1)
+        for l in n_lines:
+            draw.text((px, y_note), l, font=f_note, fill=(226, 232, 240))
 
-    # Panel 1: Total Books (Left)
-    draw_panel(40, 155, 445, 315, (235, 51, 73), "Reading Volume", f"{stats['total_books']} Books Read", archetype, archetype_desc)
+    # Panel 1: Total Books (Warm Rose)
+    draw_panel(40, 156, 445, 328, (190, 24, 93), (244, 63, 94),
+               "Reading Volume", f"{stats['total_books']} Books Read", archetype, archetype_desc)
 
-    # Panel 2: Highest Rated (Right)
+    # Panel 2: Highest Rated (Modern Indigo)
     top_r = stats["top_rated"]
     r_stat = f"{top_r.iloc[0]['My Rating']} / 5 Stars" if not top_r.empty else "Unrated"
     r_sub = f"{top_r.iloc[0]['Title']} by {top_r.iloc[0]['Author']}" if not top_r.empty else "No rated books"
-    draw_panel(475, 155, w - 40, 315, (248, 87, 166), "Top Rated Read", r_stat, r_sub, "Benchmark reads of the year")
+    draw_panel(475, 156, w - 40, 328, (67, 56, 202), (129, 140, 248),
+               "Top Rated Read", r_stat, r_sub, "Highest rated benchmark read of the year")
 
-    # Panel 3: Most Read Genre (Left)
+    # Panel 3: Most Read Genre (Emerald Teal)
     top_g = stats["top_genres"]
     g_stat = str(top_g.iloc[0]["Genre"]).title() if not top_g.empty else "None"
     g_sub = f"{int(top_g.iloc[0]['Books Read'])} books in this genre" if not top_g.empty else "Enrich to reveal"
-    draw_panel(40, 332, 445, 492, (17, 153, 142), "Most Read Genre", g_stat, g_sub, "Your most visited literary world")
+    draw_panel(40, 344, 445, 516, (13, 148, 136), (45, 212, 191),
+               "Most Read Genre", g_stat, g_sub, "Your most visited literary world")
 
-    # Panel 4: Longest Book (Right)
+    # Panel 4: Longest Book (Warm Bronze)
     long_b = stats["longest_book"]
     l_stat = f"{int(long_b.iloc[0]['Pages'])} Pages" if not long_b.empty and pd.notnull(long_b.iloc[0]["Pages"]) else "N/A"
     l_sub = f"{long_b.iloc[0]['Title']} by {long_b.iloc[0]['Author']}" if not long_b.empty else "Page count missing"
-    draw_panel(475, 332, w - 40, 492, (101, 78, 163), "Longest Book Read", l_stat, l_sub, "An epic journey of endurance")
+    draw_panel(475, 344, w - 40, 516, (180, 83, 9), (251, 191, 36),
+               "Longest Book Read", l_stat, l_sub, "An epic journey of endurance")
 
-    # Panel 5: Highest Rated Genre (Full Width)
+    # Panel 5: Highest Rated Genre (Royal Violet)
     enj_g = stats["enjoyed_genres"]
     e_stat = str(enj_g.iloc[0]["Genre"]).title() if not enj_g.empty else "N/A"
     if not enj_g.empty:
@@ -1042,10 +1076,13 @@ def generate_wrapped_poster_image(stats: Dict[str, object], archetype: str, arch
         e_sub = f"{r_avg:.2f} Avg Rating - {first_title}" if first_title else f"{r_avg:.2f} Avg Rating"
     else:
         e_sub = "Rate more to reveal"
-    draw_panel(40, 509, w - 40, 669, (120, 60, 200), "Highest Rated Genre", e_stat, e_sub, "The genre that earned your highest praise")
+    draw_panel(40, 532, w - 40, 704, (109, 40, 217), (167, 139, 250),
+               "Highest Rated Genre", e_stat, e_sub, "The genre that earned your highest personal praise")
 
-    # Footer (clean ASCII, no emojis)
-    draw.text((w // 2 - 110, h - 45), "Generated with NextChapter", font=f_sub, fill=(130, 130, 140))
+    # Footer
+    footer_text = "Created with NextChapter • Your Personal Book Recommender"
+    draw.text((w // 2 - int(draw.textlength(footer_text, font=f_footer)) // 2, h - 50),
+              footer_text, font=f_footer, fill=(100, 116, 139))
 
     buf = io.BytesIO()
     img.save(buf, format="PNG")
