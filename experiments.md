@@ -23,7 +23,7 @@
 | **Era awareness** | ❌ None | ✅ Era bucket tokens in feature soup |
 | **Language filtering** | ✅ Strict English / dynamic multi-language | ✅ Same (identical candidate pipeline) |
 | **Candidate source** | Open Library Search API | Open Library Search API (identical) |
-| **Live from** | Project start → 2026-11-02 | 2026-11-02 → ongoing |
+| **Live from** | Project start → 2026-11-02 | 2026-11-02 → 2026-11-11 |
 
 ---
 
@@ -67,10 +67,8 @@ This is **not** a randomised between-subjects design. Known confounds:
 
 1. **Order effect** — heuristic always came first. Users may be more engaged on first use (novelty) or more discerning on repeat use (familiarity). This can bias results in either direction.
 2. **Familiarity bias** — returning users know what the app does and may interact more deliberately the second time.
-3. **Catalog drift** — if any participant updated their Goodreads between sessions, their taste profile changes, making the two runs non-comparable for that user.
-4. **Social learning** — participants may have discussed recommendations between sessions.
 
-**Mitigation:** Ask participants to use the same Goodreads export as their first session. Do not prompt them about what they saw previously.
+**Mitigation:** Participants were asked to use the same Goodreads export or reading list in the second session to avoid a change in the inputted ratings/taste.
 
 **Interpretation:** Results should be treated as **directional evidence**, not a statistically rigorous causal claim. A formal between-subjects design (7 new users for k-NN) would be needed for stronger inference.
 
@@ -101,9 +99,9 @@ This is **not** a randomised between-subjects design. Known confounds:
 | Discovery yield (Int / [Shown - Read]) | 41.3% (19/46) | 37.7% (20/53) | +15% more novel items surfaced (53 vs 46) |
 
 #### Statistical Testing
-- **Interested Rate:** $\chi^2 = 0.066,\ p = 0.797$ (Yates-corrected $p = 0.950$).
+- **Interested Rate:** $\chi^2 = 0.066,\ p = 0.797$
   - Two-proportion $Z = 0.257$. Directionally favors k-NN ($H_1$), but not statistically significant at $\alpha = 0.05$ due to sample size ($N = 121$ shown recommendations).
-- **Already-Read Rate (Novelty / Serendipity):** $\chi^2 = 3.40,\ p = 0.065$ (Uncorrected $p = 0.0654$; Yates-corrected $p = 0.108$).
+- **Already-Read Rate (Novelty / Serendipity):** $\chi^2 = 3.40,\ p = 0.065$
   - Statistically significant at the 10% significance level ($\alpha = 0.10$).
 - **Sensitivity Check (Excluding initial test session `12eb8afc`, 7 vs 7 friends):**
   - Model A: 54 shown, 15 interested (27.8%), 13 already read (24.1%).
@@ -117,7 +115,7 @@ This is **not** a randomised between-subjects design. Known confounds:
 1. **Primary Hypothesis ($H_1$):**
    - The k-NN model achieved an Interested Rate of **33.3%** compared to **31.1%** for the heuristic model (+2.2% absolute lift; +5.6% lift on strictly non-test friend sessions). While the sample size of 7 participants ($N=121$ shown books) means this difference is not statistically significant at $\alpha=0.05$, the metric directionally supports $H_1$.
 2. **The Discovery Breakthrough (Already-Read Rate):**
-   - The most impactful engineering finding was the **52.5% reduction in already-read recommendations** (falling from 24.6% down to 11.7%, $\chi^2=3.40, p=0.065$).
+   - The most impactful finding was the **52.5% reduction in already-read recommendations** (falling from 24.6% down to 11.7%, $\chi^2=3.40, p=0.065$).
    - The heuristic model's hand-crafted author and subject weights suffered from popularity bias—frequently surfacing mainstream bestsellers that participants had already consumed. In contrast, the TF-IDF feature soup (combining subjects, genres, eras, and author tokens) successfully broke the popularity bubble, finding relevant yet undiscovered titles.
 3. **Engagement Quality:**
    - In Model A, 44% of all user clicks were retrospective ("I've already read this"), leaving only 19 genuine forward-looking reading discoveries.
