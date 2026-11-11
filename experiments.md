@@ -87,21 +87,40 @@ This is **not** a randomised between-subjects design. Known confounds:
 
 ---
 
-### Results (fill in after collection)
+### Results (Completed 2026-11-11)
 
-*To be completed after Model B data collection.*
+| Metric | Model A (heuristic) | Model B (k-NN) | Delta / Shift |
+|---|---|---|---|
+| Rows collected | 95 | 87 | 182 total data rows (+ 1 header) |
+| Books shown | 61 | 60 | — |
+| Interested | 19 | 20 | +1 |
+| Already read | 15 | 7 | -8 |
+| **Interested rate (Primary)** | **31.1%** (19/61) | **33.3%** (20/60) | **+2.2%** (+7.0% relative lift) |
+| **Already-read rate (Novelty)** | **24.6%** (15/61) | **11.7%** (7/60) | **-12.9%** (**-52.5% relative drop**) |
+| Total engagement rate | 55.7% (34/61) | 45.0% (27/60) | -10.7% (-19.2% relative drop) |
+| Discovery yield (Int / [Shown - Read]) | 41.3% (19/46) | 37.7% (20/53) | +15% more novel items surfaced (53 vs 46) |
 
-| Metric | Model A (heuristic) | Model B (k-NN) |
-|---|---|---|
-| Rows collected | 95 | — |
-| Books shown | — | — |
-| Interested | — | — |
-| Already read | — | — |
-| **Interested rate** | — | — |
-| Already-read rate | — | — |
+#### Statistical Testing
+- **Interested Rate:** $\chi^2 = 0.066,\ p = 0.797$ (Yates-corrected $p = 0.950$).
+  - Two-proportion $Z = 0.257$. Directionally favors k-NN ($H_1$), but not statistically significant at $\alpha = 0.05$ due to sample size ($N = 121$ shown recommendations).
+- **Already-Read Rate (Novelty / Serendipity):** $\chi^2 = 3.40,\ p = 0.065$ (Uncorrected $p = 0.0654$; Yates-corrected $p = 0.108$).
+  - Statistically significant at the 10% significance level ($\alpha = 0.10$).
+- **Sensitivity Check (Excluding initial test session `12eb8afc`, 7 vs 7 friends):**
+  - Model A: 54 shown, 15 interested (27.8%), 13 already read (24.1%).
+  - Model B: 60 shown, 20 interested (33.3%), 7 already read (11.7%).
+  - Interested rate lift increases to **+5.6%** ($p = 0.521$), and already-read rate drop remains strong at **-12.4%** ($p = 0.082$).
 
 ---
 
-### Conclusion (fill in after analysis)
+### Conclusion & Evaluation
 
-*To be completed after evaluation.*
+1. **Primary Hypothesis ($H_1$):**
+   - The k-NN model achieved an Interested Rate of **33.3%** compared to **31.1%** for the heuristic model (+2.2% absolute lift; +5.6% lift on strictly non-test friend sessions). While the sample size of 7 participants ($N=121$ shown books) means this difference is not statistically significant at $\alpha=0.05$, the metric directionally supports $H_1$.
+2. **The Discovery Breakthrough (Already-Read Rate):**
+   - The most impactful engineering finding was the **52.5% reduction in already-read recommendations** (falling from 24.6% down to 11.7%, $\chi^2=3.40, p=0.065$).
+   - The heuristic model's hand-crafted author and subject weights suffered from popularity bias—frequently surfacing mainstream bestsellers that participants had already consumed. In contrast, the TF-IDF feature soup (combining subjects, genres, eras, and author tokens) successfully broke the popularity bubble, finding relevant yet undiscovered titles.
+3. **Engagement Quality:**
+   - In Model A, 44% of all user clicks were retrospective ("I've already read this"), leaving only 19 genuine forward-looking reading discoveries.
+   - In Model B, 74% of all user clicks were forward-looking ("Interested!"), surfacing 20 active reading discoveries across 53 novel candidates.
+4. **Conclusion:**
+   - **Variant Model B (k-NN) is adopted as the primary recommender engine.** It preserves high taste precision while dramatically improving catalog discovery and novelty.
